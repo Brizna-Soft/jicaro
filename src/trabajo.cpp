@@ -11,6 +11,25 @@
 #include "hilos.hpp"
 #include "util.hpp"
 
+namespace
+{
+    // Marca el error y pone el texto; si ni para el texto hay memoria, se avisa igual (sin texto)
+    template <class R> void PonerError(R& r, const wchar_t* texto)
+    {
+        r.estado = jicaro::Estado::Error;
+        try
+        {
+            r.mensaje = texto;
+        }
+        catch (...)
+        {
+        }
+    }
+
+    constexpr const wchar_t* kNoEmpezoLista = L"No se pudo empezar a leer el archivo. Cierra otros programas y vuelve a intentarlo.";
+    constexpr const wchar_t* kNoEmpezoExtraer = L"No se pudo empezar a extraer. Cierra otros programas y vuelve a intentarlo.";
+}
+
 Trabajo::~Trabajo()
 {
     *m_vivo = false;
@@ -93,17 +112,33 @@ void Trabajo::Listar(std::vector<std::wstring> partes, std::wstring nombreSuelto
     m_cancelar = false;
     m_ocupado = true;
     m_avisoPendiente = false;
+    // Todo lo que reserva memoria se arma aquí, antes de empezar: al final el hilo solo avisa. «alTerminar» se copia (no
+    // se mueve) para poder usarlo directo si algo de esto falla.
+    std::shared_ptr<jicaro::Contenido> resultado;
+    std::shared_ptr<std::function<void()>> aviso;
     try
     {
-        // Todo lo que reserva memoria se arma aquí, antes de empezar: al final el hilo solo avisa
-        auto resultado = std::make_shared<jicaro::Contenido>();
+        resultado = std::make_shared<jicaro::Contenido>();
         auto hecho = std::make_shared<std::atomic<bool>>(false);
         auto vivo = m_vivo;
-        m_aviso = std::make_shared<std::function<void()>>([this, resultado, alTerminar = std::move(alTerminar), vivo, hecho]() {
+        aviso = std::make_shared<std::function<void()>>([this, resultado, alTerminar, vivo, hecho]() {
             if (!*vivo || hecho->exchange(true)) return;
             m_ocupado = false;
             alTerminar(std::move(*resultado));
         });
+    }
+    catch (...)
+    {
+        // Sin memoria ni para empezar: se avisa directo a la ventana (sale de «leyendo»), sin depender de m_aviso
+        m_ocupado = false;
+        jicaro::Contenido c;
+        PonerError(c, kNoEmpezoLista);
+        alTerminar(std::move(c));
+        return;
+    }
+    m_aviso = aviso;
+    try
+    {
         m_hilo = std::thread([this, partes = std::move(partes), nombreSuelto = std::move(nombreSuelto), resultado]() {
             try
             {
@@ -124,9 +159,9 @@ void Trabajo::Listar(std::vector<std::wstring> partes, std::wstring nombreSuelto
     }
     catch (...)
     {
-        // No se pudo ni empezar (sin memoria o sin hilos): se avisa igual, desde la ventana
-        m_ocupado = false;
-        if (m_aviso) (*m_aviso)();
+        // No se pudo crear el hilo: se avisa ya, con un error
+        PonerError(*resultado, kNoEmpezoLista);
+        (*aviso)();
     }
 }
 
@@ -136,17 +171,33 @@ void Trabajo::Extraer(jicaro::Opciones opciones, std::function<void(jicaro::Resu
     m_cancelar = false;
     m_ocupado = true;
     m_avisoPendiente = false;
+    std::shared_ptr<jicaro::Resumen> resultado;
+    std::shared_ptr<std::function<void()>> aviso;
+    std::shared_ptr<jicaro::Opciones> op;
     try
     {
-        auto resultado = std::make_shared<jicaro::Resumen>();
+        resultado = std::make_shared<jicaro::Resumen>();
         auto hecho = std::make_shared<std::atomic<bool>>(false);
         auto vivo = m_vivo;
-        m_aviso = std::make_shared<std::function<void()>>([this, resultado, alTerminar = std::move(alTerminar), vivo, hecho]() {
+        aviso = std::make_shared<std::function<void()>>([this, resultado, alTerminar, vivo, hecho]() {
             if (!*vivo || hecho->exchange(true)) return;
             m_ocupado = false;
             alTerminar(std::move(*resultado));
         });
-        auto op = std::make_shared<jicaro::Opciones>(std::move(opciones));
+        op = std::make_shared<jicaro::Opciones>(std::move(opciones));
+    }
+    catch (...)
+    {
+        // Sin memoria ni para empezar: se avisa directo a la ventana (sale de «extrayendo»), sin depender de m_aviso
+        m_ocupado = false;
+        jicaro::Resumen r;
+        PonerError(r, kNoEmpezoExtraer);
+        alTerminar(std::move(r));
+        return;
+    }
+    m_aviso = aviso;
+    try
+    {
         m_hilo = std::thread([this, op, resultado]() {
             try
             {
@@ -196,7 +247,8 @@ void Trabajo::Extraer(jicaro::Opciones opciones, std::function<void(jicaro::Resu
     }
     catch (...)
     {
-        m_ocupado = false;
-        if (m_aviso) (*m_aviso)();
+        // No se pudo crear el hilo: se avisa ya, con un error
+        PonerError(*resultado, kNoEmpezoExtraer);
+        (*aviso)();
     }
 }
