@@ -149,6 +149,8 @@ bool VentanaProgreso::Empezar()
 
 void VentanaProgreso::AlTick(wxTimerEvent&)
 {
+    m_trabajo.RecogerPendiente();   // por si el aviso de «terminé» no pudo llegar solo
+    if (m_terminado) return;
     auto& p = m_trabajo.Progreso();
     int64_t total = p.totalComprimido, leidos = p.leidos;
     int valor = total > 0 ? (int)std::min<int64_t>(1000, leidos * 1000 / total) : 0;

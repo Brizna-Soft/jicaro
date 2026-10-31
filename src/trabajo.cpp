@@ -64,50 +64,69 @@ template <class T> T Trabajo::Preguntar(std::function<T()> f, T siNo)
     return e->valor ? *e->valor : siNo;
 }
 
+void Trabajo::Entregar()
+{
+    bool enviado = false;
+    try
+    {
+        auto aviso = m_aviso;
+        enviado = aviso && jicaro::hilos::Enviar([aviso]() { (*aviso)(); });
+    }
+    catch (...)
+    {
+    }
+    if (!enviado) m_avisoPendiente = true;   // lo recoge el reloj de la ventana
+}
+
+void Trabajo::RecogerPendiente()
+{
+    if (m_avisoPendiente.exchange(false) && m_aviso)
+    {
+        auto aviso = m_aviso;
+        (*aviso)();
+    }
+}
+
 void Trabajo::Listar(std::vector<std::wstring> partes, std::wstring nombreSuelto, std::function<void(jicaro::Contenido)> alTerminar)
 {
     Esperar();
     m_cancelar = false;
     m_ocupado = true;
-    auto vivo = m_vivo;
-    // Todo lo que puede fallar (también por falta de memoria) queda dentro de try: nada escapa del hilo
-    auto entregar = [this, alTerminar, vivo](std::shared_ptr<jicaro::Contenido> c) {
-        if (!jicaro::hilos::Enviar([this, c, alTerminar, vivo]() {
-                if (!*vivo) return;
-                m_ocupado = false;
-                alTerminar(std::move(*c));
-            }))
-            m_ocupado = false;
-    };
+    m_avisoPendiente = false;
     try
     {
+        // Todo lo que reserva memoria se arma aquí, antes de empezar: al final el hilo solo avisa
         auto resultado = std::make_shared<jicaro::Contenido>();
-        m_hilo = std::thread([this, partes = std::move(partes), nombreSuelto = std::move(nombreSuelto), resultado, entregar]() {
+        auto hecho = std::make_shared<std::atomic<bool>>(false);
+        auto vivo = m_vivo;
+        m_aviso = std::make_shared<std::function<void()>>([this, resultado, alTerminar = std::move(alTerminar), vivo, hecho]() {
+            if (!*vivo || hecho->exchange(true)) return;
+            m_ocupado = false;
+            alTerminar(std::move(*resultado));
+        });
+        m_hilo = std::thread([this, partes = std::move(partes), nombreSuelto = std::move(nombreSuelto), resultado]() {
             try
             {
                 *resultado = jicaro::Listar(partes, nombreSuelto, m_progreso, m_cancelar);
             }
             catch (...)
             {
-                resultado->mensaje = L"Algo salió mal al leer este archivo.";
+                try
+                {
+                    resultado->mensaje = L"Algo salió mal al leer este archivo.";
+                }
+                catch (...)
+                {
+                }
             }
-            try
-            {
-                entregar(resultado);
-            }
-            catch (...)
-            {
-                m_ocupado = false;
-            }
+            Entregar();
         });
     }
     catch (...)
     {
         // No se pudo ni empezar (sin memoria o sin hilos): se avisa igual, desde la ventana
         m_ocupado = false;
-        jicaro::Contenido c;
-        c.mensaje = L"No se pudo empezar a leer el archivo.";
-        alTerminar(std::move(c));
+        if (m_aviso) (*m_aviso)();
     }
 }
 
@@ -116,20 +135,19 @@ void Trabajo::Extraer(jicaro::Opciones opciones, std::function<void(jicaro::Resu
     Esperar();
     m_cancelar = false;
     m_ocupado = true;
-    auto vivo = m_vivo;
-    auto entregar = [this, alTerminar, vivo](std::shared_ptr<jicaro::Resumen> r) {
-        if (!jicaro::hilos::Enviar([this, r, alTerminar, vivo]() {
-                if (!*vivo) return;
-                m_ocupado = false;
-                alTerminar(std::move(*r));
-            }))
-            m_ocupado = false;
-    };
+    m_avisoPendiente = false;
     try
     {
         auto resultado = std::make_shared<jicaro::Resumen>();
+        auto hecho = std::make_shared<std::atomic<bool>>(false);
+        auto vivo = m_vivo;
+        m_aviso = std::make_shared<std::function<void()>>([this, resultado, alTerminar = std::move(alTerminar), vivo, hecho]() {
+            if (!*vivo || hecho->exchange(true)) return;
+            m_ocupado = false;
+            alTerminar(std::move(*resultado));
+        });
         auto op = std::make_shared<jicaro::Opciones>(std::move(opciones));
-        m_hilo = std::thread([this, op, resultado, entregar]() {
+        m_hilo = std::thread([this, op, resultado]() {
             try
             {
                 std::wstring archivo = op->partes.empty() ? L"" : op->partes.front();
@@ -162,24 +180,23 @@ void Trabajo::Extraer(jicaro::Opciones opciones, std::function<void(jicaro::Resu
             }
             catch (...)
             {
-                resultado->estado = jicaro::Estado::Error;
-                resultado->mensaje = L"Algo salió mal al extraer.";
+                // Si ya había un resultado de Extraer (con lo que quedó a medias), se conserva; si no, se marca el error
+                if (resultado->estado == jicaro::Estado::Bien && resultado->archivos == 0 && resultado->omitidas.empty())
+                    resultado->estado = jicaro::Estado::Error;
+                try
+                {
+                    if (resultado->mensaje.empty()) resultado->mensaje = L"Algo salió mal al extraer.";
+                }
+                catch (...)
+                {
+                }
             }
-            try
-            {
-                entregar(resultado);
-            }
-            catch (...)
-            {
-                m_ocupado = false;
-            }
+            Entregar();
         });
     }
     catch (...)
     {
         m_ocupado = false;
-        jicaro::Resumen r;
-        r.mensaje = L"No se pudo empezar a extraer.";
-        alTerminar(std::move(r));
+        if (m_aviso) (*m_aviso)();
     }
 }

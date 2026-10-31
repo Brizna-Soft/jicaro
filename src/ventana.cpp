@@ -511,6 +511,8 @@ void VentanaPrincipal::MostrarAjustes()
 
 void VentanaPrincipal::AlTick(wxTimerEvent&)
 {
+    m_trabajo.RecogerPendiente();   // por si el aviso de «terminé» no pudo llegar solo
+    if (!m_trabajo.Ocupado() && !m_listando && !m_extrayendo) return;
     auto& p = m_trabajo.Progreso();
     // Con la lista completa se sabe cuánto se va a escribir; si no, se mide por lo leído del archivo comprimido
     int64_t esperado = p.totalEsperado, total = p.totalComprimido, leidos = p.leidos;

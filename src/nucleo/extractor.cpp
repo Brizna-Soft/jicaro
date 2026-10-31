@@ -1209,6 +1209,10 @@ namespace
                 continue;
             }
 
+            // Los datos del archivo en curso se guardan antes de crearlo (si falta memoria, que sea antes y no después)
+            m_enCurso.activo = false;
+            m_enCurso.completa = completa;
+            m_enCurso.relativa = *relativa;
             EntradaPropia s(archive_entry_new());
             archive_entry_copy_pathname_w(s.get(), relativa->c_str());
             archive_entry_set_filetype(s.get(), AE_IFREG);
@@ -1229,7 +1233,8 @@ namespace
                 Omitir(cruda, L"apareció otro archivo con ese nombre mientras se extraía; no se tocó", Tipo::Falla);
                 continue;
             }
-            m_enCurso = { completa, *relativa, IdentidadDe(completa), true };
+            m_enCurso.id = IdentidadDe(completa);
+            m_enCurso.activo = true;
             bool fatal = false, incompleto = false;
             bool completo = CopiarDatos(w, e, cruda, fatal, incompleto);
             int fin = archive_write_finish_entry(w);
@@ -1331,14 +1336,20 @@ namespace
                     catch (...)
                     {
                         // Sin memoria u otra falla rara: se conserva lo que ya se sabe y se limpia el archivo en curso
-                        if (m_enCurso.activo)
-                        {
-                            archive_write_finish_entry(w.get());
-                            m_enCurso.activo = false;
-                            QuitarAMedias(m_enCurso.completa, m_enCurso.relativa, m_enCurso.id);
-                        }
                         m_res.estado = Estado::Error;
-                        m_res.mensaje = L"No alcanzó la memoria, o algo salió mal, y la extracción se detuvo.";
+                        try
+                        {
+                            if (m_enCurso.activo)
+                            {
+                                archive_write_finish_entry(w.get());
+                                m_enCurso.activo = false;
+                                QuitarAMedias(m_enCurso.completa, m_enCurso.relativa, m_enCurso.id);
+                            }
+                            m_res.mensaje = L"No alcanzó la memoria, o algo salió mal, y la extracción se detuvo.";
+                        }
+                        catch (...)
+                        {
+                        }
                     }
                     // «w» se cierra aquí, todavía con la carpeta de trabajo puesta (fechas de las carpetas)
                 }
