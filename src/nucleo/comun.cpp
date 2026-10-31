@@ -185,13 +185,30 @@ bool jicaro::Identidad::operator==(const Identidad& o) const
 jicaro::Identidad jicaro::IdentidadDe(void* manejador)
 {
     Identidad r;
+    if (!manejador || manejador == INVALID_HANDLE_VALUE) return r;
+    // NTFS y ReFS: identificador de 128 bits
     FILE_ID_INFO info;
-    if (manejador && manejador != INVALID_HANDLE_VALUE
-        && GetFileInformationByHandleEx((HANDLE)manejador, FileIdInfo, &info, sizeof(info)))
+    if (GetFileInformationByHandleEx((HANDLE)manejador, FileIdInfo, &info, sizeof(info)))
     {
-        r.volumen = info.VolumeSerialNumber;
+        static const unsigned char ceros[16] = {};
         static_assert(sizeof(r.id) == sizeof(info.FileId.Identifier));
-        memcpy(r.id, info.FileId.Identifier, sizeof(r.id));
+        if (memcmp(info.FileId.Identifier, ceros, sizeof(ceros)) != 0)
+        {
+            r.volumen = info.VolumeSerialNumber;
+            memcpy(r.id, info.FileId.Identifier, sizeof(r.id));
+            r.ok = true;
+            return r;
+        }
+    }
+    // FAT32, exFAT y algunas carpetas de red no tienen ese dato: se usa el índice clásico de 64 bits (se distingue
+    // del otro con el último byte, para no mezclarlos)
+    BY_HANDLE_FILE_INFORMATION clasica;
+    if (GetFileInformationByHandle((HANDLE)manejador, &clasica) && (clasica.nFileIndexHigh || clasica.nFileIndexLow))
+    {
+        r.volumen = clasica.dwVolumeSerialNumber;
+        memcpy(r.id, &clasica.nFileIndexLow, sizeof(DWORD));
+        memcpy(r.id + 4, &clasica.nFileIndexHigh, sizeof(DWORD));
+        r.id[15] = 0xC1;
         r.ok = true;
     }
     return r;

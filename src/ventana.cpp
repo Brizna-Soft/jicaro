@@ -468,6 +468,7 @@ void VentanaPrincipal::AlTerminarExtraccion(const jicaro::Resumen& r, const std:
     m_extrayendo = false;
     if (m_cerrarAlTerminar)
     {
+        if (!r.aMedias.empty()) dialogos::MostrarResumen(this, r, destino);
         Close();
         return;
     }
@@ -479,7 +480,7 @@ void VentanaPrincipal::AlTerminarExtraccion(const jicaro::Resumen& r, const std:
         return;
     }
     Liberar(jicaro::TextoEstado(r.estado));
-    if (r.estado != jicaro::Estado::Cancelado || r.archivos > 0) dialogos::MostrarResumen(this, r, destino);
+    if (r.estado != jicaro::Estado::Cancelado || r.archivos > 0 || !r.aMedias.empty()) dialogos::MostrarResumen(this, r, destino);
 }
 
 void VentanaPrincipal::MostrarAjustes()

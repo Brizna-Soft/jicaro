@@ -200,7 +200,13 @@ bool dialogos::ElegirDestino(wxWindow* padre, const wxString& titulo, std::wstri
         if (d.ShowModal() != wxID_OK) return false;
         std::wstring elegida = ruta->GetValue().Strip(wxString::both).ToStdWstring();
         bool conUnidad = elegida.size() >= 3 && elegida[1] == L':' && (elegida[2] == L'\\' || elegida[2] == L'/');
-        bool deRed = elegida.size() > 4 && elegida.rfind(L"\\\\", 0) == 0 && elegida[2] != L'?' && elegida[2] != L'.';
+        bool deRed = false;
+        if (elegida.rfind(L"\\\\", 0) == 0 && elegida.size() > 2 && elegida[2] != L'?' && elegida[2] != L'.')
+        {
+            // \\servidor\compartida[\carpeta...]: servidor y carpeta compartida no vacíos
+            size_t barra = elegida.find(L'\\', 2);
+            deRed = barra != std::wstring::npos && barra > 2 && barra + 1 < elegida.size() && elegida[barra + 1] != L'\\';
+        }
         if (conUnidad || deRed)
         {
             carpeta = jicaro::RutaCompleta(elegida);

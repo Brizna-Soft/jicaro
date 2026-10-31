@@ -176,7 +176,7 @@ void VentanaProgreso::AlTerminar(const jicaro::Resumen& r)
     case jicaro::Estado::SinContrasena: codigo = SALIDA_CONTRASENA; break;
     default: codigo = SALIDA_ERROR;
     }
-    if (m_cerrarAlTerminar || (r.estado == jicaro::Estado::Cancelado && r.archivos == 0))
+    if (r.aMedias.empty() && (m_cerrarAlTerminar || (r.estado == jicaro::Estado::Cancelado && r.archivos == 0)))
     {
         PonerCodigoDeSalida(codigo);
         m_terminado = true;
@@ -185,6 +185,7 @@ void VentanaProgreso::AlTerminar(const jicaro::Resumen& r)
     }
     bool limpio = r.Limpio();
     m_barra->SetValue(limpio ? 1000 : m_barra->GetValue());
+    if (codigo == SALIDA_CANCELADO || codigo == SALIDA_ERROR) m_barra->Hide();   // la barra llena confundiría
     m_abrir->Show(r.archivos > 0 && jicaro::ExisteCarpeta(m_destino));
     Terminar(codigo, dialogos::TextoResumen(r, m_destino), dialogos::TextoOmitidas(r), limpio);
 }
