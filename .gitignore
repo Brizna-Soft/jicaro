@@ -1,0 +1,6 @@
+build/
+programa/
+publicar/
+pruebas-locales/
+vendor/
+*.user

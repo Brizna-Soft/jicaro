@@ -1,0 +1,41 @@
+#pragma code_page(65001)
+
+#include <winver.h>
+#include "version.h"
+
+// El ícono va primero (nombre que empieza por AAAA) para que Windows lo use como ícono del .exe
+AAAA_APP ICON "app.ico"
+
+// Manifiesto de wxWidgets: controles comunes v6 y DPI por monitor (v2)
+#define wxUSE_RC_MANIFEST 1
+#define wxUSE_DPI_AWARE_MANIFEST 2
+#include "wx/msw/wx.rc"
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION    APP_VERSION_NUM
+ PRODUCTVERSION APP_VERSION_NUM
+ FILEFLAGSMASK  0x3fL
+ FILEFLAGS      0x0L
+ FILEOS         VOS_NT_WINDOWS32
+ FILETYPE       VFT_APP
+ FILESUBTYPE    0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "0c0a04b0"
+        BEGIN
+            VALUE "CompanyName",      "Brizna Soft"
+            VALUE "FileDescription",  "Jícaro: descompresor de archivos"
+            VALUE "FileVersion",      APP_VERSION
+            VALUE "InternalName",     "Jicaro"
+            VALUE "LegalCopyright",   "© 2026 Brizna Soft. Licencia MIT."
+            VALUE "OriginalFilename", "Jicaro.exe"
+            VALUE "ProductName",      "Jícaro"
+            VALUE "ProductVersion",   APP_VERSION_TEXTO
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0c0a, 1200
+    END
+END

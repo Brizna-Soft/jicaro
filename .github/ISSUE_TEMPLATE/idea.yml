@@ -1,0 +1,16 @@
+name: Tengo una idea
+description: Algo que te gustaría que Jícaro hiciera
+labels: ["idea"]
+body:
+  - type: textarea
+    id: idea
+    attributes:
+      label: ¿Qué te gustaría?
+      description: Cuéntanos la idea y para qué te serviría.
+    validations:
+      required: true
+  - type: textarea
+    id: ahora
+    attributes:
+      label: ¿Cómo lo haces ahora?
+      description: Por ejemplo, con qué otro programa.

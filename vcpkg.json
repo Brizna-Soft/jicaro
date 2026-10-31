@@ -1,0 +1,17 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+  "name": "jicaro",
+  "version-string": "0.1.0",
+  "dependencies": [
+    {
+      "name": "wxwidgets",
+      "default-features": false
+    },
+    {
+      "name": "libarchive",
+      "default-features": false,
+      "features": [ "bzip2", "lzma", "zstd" ]
+    },
+    "nlohmann-json"
+  ]
+}
