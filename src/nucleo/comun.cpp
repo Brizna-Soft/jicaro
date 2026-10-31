@@ -3,6 +3,7 @@
 #include <windows.h>
 #include <shellapi.h>
 
+#include <cstring>
 #include <cwctype>
 #include <vector>
 
@@ -169,8 +170,69 @@ bool jicaro::MandarAPapelera(const std::wstring& ruta)
     op.wFunc = FO_DELETE;
     op.pFrom = doble.c_str();
     // FOF_WANTNUKEWARNING: si el disco no tiene Papelera (por ejemplo, algunas memorias USB), Windows pregunta antes
-    // de borrar para siempre, en vez de borrar sin avisar
-    op.fFlags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT | FOF_NOERRORUI | FOF_WANTNUKEWARNING;
+    // de borrar para siempre, en vez de borrar sin avisar. FOF_NO_CONNECTED_ELEMENTS: solo ese archivo, sin la carpeta
+    // «_archivos» que el Explorador asocia a una página web guardada.
+    op.fFlags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT | FOF_NOERRORUI | FOF_WANTNUKEWARNING | FOF_NO_CONNECTED_ELEMENTS;
     return SHFileOperationW(&op) == 0 && !op.fAnyOperationsAborted
         && GetFileAttributesW(rutas::Larga(ruta).c_str()) == INVALID_FILE_ATTRIBUTES;
+}
+
+bool jicaro::Identidad::operator==(const Identidad& o) const
+{
+    return ok && o.ok && volumen == o.volumen && memcmp(id, o.id, sizeof(id)) == 0;
+}
+
+jicaro::Identidad jicaro::IdentidadDe(void* manejador)
+{
+    Identidad r;
+    FILE_ID_INFO info;
+    if (manejador && manejador != INVALID_HANDLE_VALUE
+        && GetFileInformationByHandleEx((HANDLE)manejador, FileIdInfo, &info, sizeof(info)))
+    {
+        r.volumen = info.VolumeSerialNumber;
+        static_assert(sizeof(r.id) == sizeof(info.FileId.Identifier));
+        memcpy(r.id, info.FileId.Identifier, sizeof(r.id));
+        r.ok = true;
+    }
+    return r;
+}
+
+jicaro::Identidad jicaro::IdentidadDe(const std::wstring& ruta)
+{
+    // Solo atributos: no choca con quien tenga el archivo abierto sin compartir
+    HANDLE h = CreateFileW(rutas::Larga(ruta).c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                           nullptr, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return {};
+    Identidad r = IdentidadDe(h);
+    CloseHandle(h);
+    return r;
+}
+
+bool jicaro::AbiertoSinCompartir(const std::wstring& ruta)
+{
+    HANDLE h = CreateFileW(rutas::Larga(ruta).c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                           nullptr, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+    if (h != INVALID_HANDLE_VALUE)
+    {
+        CloseHandle(h);
+        return false;
+    }
+    return GetLastError() == ERROR_SHARING_VIOLATION;
+}
+
+bool jicaro::BorrarSiEsElMismo(const std::wstring& ruta, const Identidad& identidad)
+{
+    if (!identidad.ok) return false;
+    HANDLE h = CreateFileW(rutas::Larga(ruta).c_str(), DELETE | FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                           nullptr, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    bool borrado = false;
+    if (IdentidadDe(h) == identidad)
+    {
+        FILE_DISPOSITION_INFO d = {};
+        d.DeleteFile = TRUE;
+        borrado = SetFileInformationByHandle(h, FileDispositionInfo, &d, sizeof(d)) != FALSE;
+    }
+    CloseHandle(h);
+    return borrado && GetFileAttributesW(rutas::Larga(ruta).c_str()) == INVALID_FILE_ATTRIBUTES;
 }

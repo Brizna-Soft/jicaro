@@ -29,6 +29,7 @@ enum CodigoSalida
     SALIDA_FALTA_PARTE = 3,
     SALIDA_CONTRASENA = 4,      // pide una contraseña que no se dio, o un cifrado que Jícaro no abre
     SALIDA_YA_EXTRAYENDO = 5,   // otra ventana de Jícaro ya está extrayendo ese mismo archivo
+    SALIDA_PARCIAL = 6,         // salió solo una parte: algo se saltó por seguridad o no se pudo extraer
 };
 
 // La pone la ventana de progreso; la devuelve el programa al terminar

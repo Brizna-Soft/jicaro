@@ -199,7 +199,9 @@ bool dialogos::ElegirDestino(wxWindow* padre, const wxString& titulo, std::wstri
     {
         if (d.ShowModal() != wxID_OK) return false;
         std::wstring elegida = ruta->GetValue().Strip(wxString::both).ToStdWstring();
-        if (elegida.size() >= 3 && elegida[1] == L':' && (elegida[2] == L'\\' || elegida[2] == L'/'))
+        bool conUnidad = elegida.size() >= 3 && elegida[1] == L':' && (elegida[2] == L'\\' || elegida[2] == L'/');
+        bool deRed = elegida.size() > 4 && elegida.rfind(L"\\\\", 0) == 0 && elegida[2] != L'?' && elegida[2] != L'.';
+        if (conUnidad || deRed)
         {
             carpeta = jicaro::RutaCompleta(elegida);
             break;
@@ -276,12 +278,19 @@ wxString dialogos::TextoResumen(const jicaro::Resumen& r, const std::wstring& de
     if (r.quitadosPorWindows > 0)
         t += wxString::Format(L"\nEl antivirus de Windows quitó %s archivos.", TextoNumero(r.quitadosPorWindows));
     if (r.sinMarca > 0)
-        t += wxString::Format(L"\nA %s archivos no se les pudo poner la marca de internet (el disco no lo permite).",
+        t += wxString::Format(L"\nA %s archivos no se les pudo poner la marca de internet (puede ser el disco, un permiso o "
+                              L"algo de Windows). Ten cuidado al abrir programas de ahí.",
                               TextoNumero(r.sinMarca));
     if (r.quitoAMedias) t += L"\nSe quitó el archivo que quedó a medias.";
-    size_t otras = r.omitidas.size() - (size_t)std::min<int64_t>(r.cifradas, (int64_t)r.omitidas.size());
-    if (otras > 0)
-        t += wxString::Format(L"\n\nSe saltaron %s por seguridad o porque no se pudieron leer:", TextoNumero((int64_t)otras));
+    if (!r.aMedias.empty())
+        t += L"\nNo se pudo quitar un archivo que quedó a medias: «" + wxString(r.aMedias) + L"». Está incompleto; puedes borrarlo.";
+    if (r.rechazados > 0 && r.fallidos > 0)
+        t += wxString::Format(L"\n\nSe saltaron %s por seguridad y %s no se pudieron extraer:", TextoNumero(r.rechazados),
+                              TextoNumero(r.fallidos));
+    else if (r.rechazados > 0)
+        t += wxString::Format(L"\n\nSe saltaron %s por seguridad:", TextoNumero(r.rechazados));
+    else if (r.fallidos > 0)
+        t += wxString::Format(L"\n\n%s no se pudieron extraer:", TextoNumero(r.fallidos));
     return t;
 }
 
@@ -309,7 +318,7 @@ void dialogos::MostrarResumen(wxWindow* padre, const jicaro::Resumen& r, const s
     auto* caja = new wxBoxSizer(wxVERTICAL);
     const int margen = d.FromDIP(14);
     auto* fila = new wxBoxSizer(wxHORIZONTAL);
-    auto icono = wxArtProvider::GetBitmapBundle(bien && r.omitidas.empty() ? wxART_INFORMATION : wxART_WARNING, wxART_MESSAGE_BOX);
+    auto icono = wxArtProvider::GetBitmapBundle(r.Limpio() ? wxART_INFORMATION : wxART_WARNING, wxART_MESSAGE_BOX);
     fila->Add(new wxStaticBitmap(&d, wxID_ANY, icono), 0, wxRIGHT, margen);
     fila->Add(Texto(&d, TextoResumen(r, destino), 460), 1);
     caja->Add(fila, 0, wxALL | wxEXPAND, margen);

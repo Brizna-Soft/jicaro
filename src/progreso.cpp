@@ -24,11 +24,10 @@ namespace
     enum { RELOJ = 1, CIERRE = 2 };
 
     // Con «Extraer en una carpeta con su nombre» el destino es una carpeta nueva al lado del archivo
+    // (si ya hay un archivo, un enlace o una unión con ese nombre, se usa otro)
     std::wstring CarpetaNueva(const jicaro::volumenes::Juego& j)
     {
-        std::wstring c = jicaro::rutas::Unir(j.carpeta, j.nombreBase);
-        if (jicaro::ExisteArchivo(c)) c = jicaro::rutas::NombreLibre(c);
-        return c;
+        return jicaro::rutas::CarpetaNuevaSegura(j.carpeta, j.nombreBase);
     }
 }
 
@@ -165,7 +164,11 @@ void VentanaProgreso::AlTerminar(const jicaro::Resumen& r)
     int codigo = SALIDA_ERROR;
     switch (r.estado)
     {
-    case jicaro::Estado::Bien: codigo = r.cifradas > 0 ? SALIDA_CONTRASENA : SALIDA_BIEN; break;
+    case jicaro::Estado::Bien:
+        if (r.cifradas > 0) codigo = SALIDA_CONTRASENA;
+        else if (r.rechazados > 0 || r.fallidos > 0 || r.quitadosPorWindows > 0 || !r.aMedias.empty()) codigo = SALIDA_PARCIAL;
+        else codigo = SALIDA_BIEN;
+        break;
     case jicaro::Estado::Cancelado:
     case jicaro::Estado::Detenido: codigo = SALIDA_CANCELADO; break;
     case jicaro::Estado::FaltaParte: codigo = SALIDA_FALTA_PARTE; break;
@@ -180,7 +183,7 @@ void VentanaProgreso::AlTerminar(const jicaro::Resumen& r)
         Close();
         return;
     }
-    bool limpio = r.estado == jicaro::Estado::Bien && r.omitidas.empty() && r.cifradas == 0;
+    bool limpio = r.Limpio();
     m_barra->SetValue(limpio ? 1000 : m_barra->GetValue());
     m_abrir->Show(r.archivos > 0 && jicaro::ExisteCarpeta(m_destino));
     Terminar(codigo, dialogos::TextoResumen(r, m_destino), dialogos::TextoOmitidas(r), limpio);

@@ -11,6 +11,7 @@
 #include <cerrno>
 #include <cstring>
 #include <memory>
+#include <new>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -61,7 +62,7 @@ namespace
         Lector(const Lector&) = delete;
         Lector& operator=(const Lector&) = delete;
 
-        bool Abrir(Preguntas* preguntas);
+        bool Abrir(Preguntas* preguntas, bool soloSuelto = false);
 
         bool Cancelar() const { return m_cancelar.load(); }
         size_t Cantidad() const { return m_partes.size(); }
@@ -271,7 +272,7 @@ namespace
         return m_devuelta.c_str();
     }
 
-    bool Lector::Abrir(Preguntas* preguntas)
+    bool Lector::Abrir(Preguntas* preguntas, bool soloSuelto)
     {
         m_preguntas = preguntas;
         a = archive_read_new();
@@ -291,13 +292,16 @@ namespace
             archive_set_error(a, EINVAL, "Falta un filtro interno");
             return false;
         }
-        archive_read_support_format_zip(a);
-        archive_read_support_format_rar(a);
-        archive_read_support_format_rar5(a);
-        archive_read_support_format_7zip(a);
-        archive_read_support_format_tar(a);
-        archive_read_support_format_iso9660(a);
-        archive_read_support_format_cab(a);
+        if (!soloSuelto)
+        {
+            archive_read_support_format_zip(a);
+            archive_read_support_format_rar(a);
+            archive_read_support_format_rar5(a);
+            archive_read_support_format_7zip(a);
+            archive_read_support_format_tar(a);
+            archive_read_support_format_iso9660(a);
+            archive_read_support_format_cab(a);
+        }
         archive_read_support_format_raw(a);     // un .gz, .bz2, .xz o .zst de un solo archivo
         archive_read_support_format_empty(a);
         // Los TAR sin datos del juego de caracteres casi siempre vienen de Linux, en UTF-8
@@ -527,27 +531,43 @@ namespace
         std::wstring m_antes, m_nueva;
     };
 
+    // Algo que ya se extrajo en esta misma extracción (para los enlaces duros): su ruta y su identidad en el disco
+    struct Hecho
+    {
+        std::wstring ruta;
+        Identidad id;
+    };
+
     class Extraccion
     {
     public:
-        Extraccion(const Opciones& op, Preguntas& pr, Progreso& prog, const std::atomic<bool>& cancelar)
-            : m_op(op), m_pr(pr), m_prog(prog), m_cancelar(cancelar), m_politica(op.siExiste)
+        Extraccion(const Opciones& op, Preguntas& pr, Progreso& prog, const std::atomic<bool>& cancelar, bool soloSuelto = false)
+            : m_op(op), m_pr(pr), m_prog(prog), m_cancelar(cancelar), m_politica(op.siExiste), m_soloSuelto(soloSuelto)
         {
         }
 
         Resumen Ejecutar();
+        // libarchive toma por «TAR vacío» un .gz (o .xz...) de un archivo que empieza con muchos ceros
+        bool TarVacio() const { return m_tarVacio; }
 
     private:
+        using Tipo = Omitida::Tipo;
+
         bool Elegida(const std::wstring& cruda) const;
-        void Omitir(const std::wstring& ruta, const std::wstring& motivo) { m_res.omitidas.push_back({ ruta, motivo }); }
+        void Omitir(const std::wstring& ruta, const std::wstring& motivo, Tipo tipo = Tipo::Seguridad);
         std::optional<std::wstring> Preparar(const std::wstring& cruda, bool carpeta);
         bool SinDesvios(const std::wstring& relativa, std::wstring& donde);
+        bool SigueSeguro(const std::wstring& relativa) const;
         Decision Decidir(const std::wstring& completa);
         bool Preguntar(const std::wstring& motivo);
         bool EsParte(const std::wstring& completa) const;
         std::wstring RelativaDe(const std::wstring& completa) const;
-        void Marcar(const std::wstring& completa);
+        void Marcar(const std::wstring& completa, const std::wstring& relativa);
+        bool Controlar(int64_t nuevos);
+        bool ControlarAntes(int64_t anunciado);
         bool CopiarDatos(archive* w, archive_entry* e, const std::wstring& cruda, bool& fatal, bool& incompleto);
+        bool CopiarEnlace(const Hecho& origen, const std::wstring& relativa, const std::wstring& cruda);
+        void QuitarAMedias(const std::wstring& completa, const std::wstring& relativa, const Identidad& id);
 
         const Opciones& m_op;
         Preguntas& m_pr;
@@ -558,9 +578,9 @@ namespace
         Lector* m_lector = nullptr;
         std::wstring m_destino;
         std::vector<std::wstring> m_partesCompletas;
+        std::vector<Identidad> m_idPartes;
         std::unordered_set<std::wstring> m_elegidas;
-        std::unordered_set<std::wstring> m_revisadas;      // carpetas ya revisadas (en minúsculas, relativas)
-        std::unordered_map<std::wstring, std::wstring> m_hechos;   // ruta en el archivo → archivo extraído
+        std::unordered_map<std::wstring, Hecho> m_hechos;  // ruta en el archivo → archivo extraído
         std::wstring m_referente;
         unsigned long m_zona = 0;
         int64_t m_libreAlEmpezar = -1;
@@ -570,7 +590,15 @@ namespace
         bool m_detenido = false;   // la persona detuvo ante una posible bomba
         bool m_sinEspacio = false;
         int m_formatoCifrado = 0;
+        bool m_soloSuelto = false, m_tarVacio = false;
     };
+
+    void Extraccion::Omitir(const std::wstring& ruta, const std::wstring& motivo, Tipo tipo)
+    {
+        m_res.omitidas.push_back({ ruta, motivo, tipo });
+        if (tipo == Tipo::Seguridad) m_res.rechazados++;
+        else if (tipo == Tipo::Falla) m_res.fallidos++;
+    }
 
     bool Extraccion::Elegida(const std::wstring& cruda) const
     {
@@ -580,10 +608,16 @@ namespace
         return false;
     }
 
+    // ¿Es una de las partes que se están leyendo? Se compara la identidad en el disco, no solo el texto: así también
+    // cuenta el nombre corto 8.3 («JUEGO~1.RAR») de una parte.
     bool Extraccion::EsParte(const std::wstring& completa) const
     {
         for (auto& p : m_partesCompletas)
             if (IgualesSinMayusculas(p, completa)) return true;
+        Identidad id = IdentidadDe(completa);
+        if (!id.ok) return false;
+        for (auto& p : m_idPartes)
+            if (p == id) return true;
         return false;
     }
 
@@ -620,38 +654,18 @@ namespace
         return d;
     }
 
+    // Revisión de cada entrada: todo el camino, cada vez (sin recordar carpetas ya revisadas, que otro programa podría
+    // cambiar por una unión mientras se extrae)
     bool Extraccion::SinDesvios(const std::wstring& relativa, std::wstring& donde)
     {
-        size_t corte = relativa.find_last_of(L'\\');
-        if (corte != std::wstring::npos)
-        {
-            std::wstring padre = relativa.substr(0, corte);
-            if (!m_revisadas.count(Minusculas(padre)))
-            {
-                if (!rutas::SinDesvios(m_destino, padre, &donde)) return false;
-                for (std::wstring p = padre;;)
-                {
-                    m_revisadas.insert(Minusculas(p));
-                    auto c = p.find_last_of(L'\\');
-                    if (c == std::wstring::npos) break;
-                    p.resize(c);
-                }
-            }
-        }
-        // El último tramo (el archivo o la carpeta misma)
-        std::wstring completa = rutas::Unir(m_destino, relativa);
-        WIN32_FIND_DATAW d;
-        HANDLE h = FindFirstFileExW(rutas::Larga(completa).c_str(), FindExInfoBasic, &d, FindExSearchNameMatch, nullptr, 0);
-        if (h != INVALID_HANDLE_VALUE)
-        {
-            FindClose(h);
-            if ((d.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) && IsReparseTagNameSurrogate(d.dwReserved0))
-            {
-                donde = completa;
-                return false;
-            }
-        }
-        return true;
+        return rutas::SinDesvios(m_destino, relativa, &donde);
+    }
+
+    // Revisión completa, sin la lista, justo antes de lo que Jícaro hace por su cuenta con una ruta (Papelera, copias,
+    // marca, borrar lo que quedó a medias): achica el tiempo en que otro programa podría cambiar una carpeta por una unión
+    bool Extraccion::SigueSeguro(const std::wstring& relativa) const
+    {
+        return rutas::DentroDe(m_destino, rutas::Unir(m_destino, relativa)) && rutas::SinDesvios(m_destino, relativa);
     }
 
     std::optional<std::wstring> Extraccion::Preparar(const std::wstring& cruda, bool carpeta)
@@ -702,9 +716,15 @@ namespace
         case Decision::Renombrar:
             return RelativaDe(rutas::NombreLibre(completa));
         case Decision::Reemplazar:
+            // La pregunta pudo tardar: se revisa todo de nuevo antes de tocar el archivo que ya estaba
+            if (!SigueSeguro(relativa) || EsParte(completa))
+            {
+                Omitir(cruda, L"la carpeta cambió mientras se preguntaba; no se tocó nada");
+                return std::nullopt;
+            }
             if (!MandarAPapelera(completa))
             {
-                Omitir(cruda, L"no se pudo mandar el archivo que ya estaba a la Papelera");
+                Omitir(cruda, L"no se pudo mandar el archivo que ya estaba a la Papelera", Tipo::Falla);
                 return std::nullopt;
             }
             return relativa;
@@ -712,12 +732,118 @@ namespace
         return std::nullopt;
     }
 
-    void Extraccion::Marcar(const std::wstring& completa)
+    void Extraccion::Marcar(const std::wstring& completa, const std::wstring& relativa)
     {
         if (!marca::HayQueMarcar(m_zona)) return;
+        if (!SigueSeguro(relativa))
+        {
+            m_res.sinMarca++;
+            return;
+        }
         if (marca::Pasar(completa, m_referente, m_zona)) m_res.marcados++;
         else if (!ExisteArchivo(completa)) m_res.quitadosPorWindows++;
         else m_res.sinMarca++;
+    }
+
+    // Lo que quedó a medias se borra solo si es el mismo archivo que esta extracción creó (por su identidad en el
+    // disco). Si no se puede, se dice cuál es y se le pone la marca de la Web igual.
+    void Extraccion::QuitarAMedias(const std::wstring& completa, const std::wstring& relativa, const Identidad& id)
+    {
+        if (SigueSeguro(relativa) && BorrarSiEsElMismo(completa, id))
+        {
+            if (m_cancelar || m_detenido || m_sinEspacio) m_res.quitoAMedias = true;
+            return;
+        }
+        if (IdentidadDe(completa) == id)
+        {
+            m_res.aMedias = completa;
+            Marcar(completa, relativa);
+        }
+    }
+
+    // Topes contra las bombas mientras se escribe. false: hay que parar.
+    bool Extraccion::Controlar(int64_t nuevos)
+    {
+        const int64_t comprimido = std::max<int64_t>(m_lector->Total(), 1);
+        m_res.escritos += nuevos;
+        m_prog.escritos += nuevos;
+        if (!m_preguntoProporcion && m_res.escritos >= m_op.limites.bytesMinimos
+            && (double)m_res.escritos > m_op.limites.proporcion * (double)comprimido)
+        {
+            m_preguntoProporcion = true;
+            std::wstring motivo = L"Lo extraído ya ocupa " + TextoTamano(m_res.escritos) + L", más de " +
+                TextoNumero(m_res.escritos / comprimido) + L" veces lo que pesa el archivo comprimido (" +
+                TextoTamano(comprimido) + L").";
+            if (!Preguntar(motivo))
+            {
+                m_detenido = true;
+                return false;
+            }
+        }
+        if (m_res.escritos >= m_proximoChequeo)
+        {
+            m_proximoChequeo = m_res.escritos + (64LL << 20);
+            int64_t libre = EspacioLibre(m_destino);
+            if (libre >= 0 && libre < m_op.limites.libreMinimo)
+            {
+                m_sinEspacio = true;
+                return false;
+            }
+            if (!m_preguntoLibre && m_libreAlEmpezar > 0 && m_res.escritos >= (1LL << 30)
+                && (double)m_res.escritos > m_op.limites.parteDelLibre * (double)m_libreAlEmpezar)
+            {
+                m_preguntoLibre = true;
+                std::wstring motivo = L"Lo extraído ya ocupa " + TextoTamano(m_res.escritos) +
+                    L", más de la mitad del espacio que estaba libre en el disco al empezar.";
+                if (!Preguntar(motivo))
+                {
+                    m_detenido = true;
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    // Los mismos topes, con el tamaño que anuncia la entrada antes de escribirla: un archivo con huecos (o una copia de
+    // un enlace duro) puede ocupar mucho sin pasar sus datos por Controlar. false: hay que parar.
+    bool Extraccion::ControlarAntes(int64_t anunciado)
+    {
+        if (anunciado <= 0) return true;
+        const int64_t comprimido = std::max<int64_t>(m_lector->Total(), 1);
+        int64_t libre = EspacioLibre(m_destino);
+        if (libre >= 0 && anunciado > libre - m_op.limites.libreMinimo)
+        {
+            m_sinEspacio = true;
+            return false;
+        }
+        int64_t proyectado = m_res.escritos + anunciado;
+        if (!m_preguntoProporcion && proyectado >= m_op.limites.bytesMinimos
+            && (double)proyectado > m_op.limites.proporcion * (double)comprimido)
+        {
+            m_preguntoProporcion = true;
+            std::wstring motivo = L"Lo extraído llegaría a ocupar " + TextoTamano(proyectado) + L", más de " +
+                TextoNumero(proyectado / comprimido) + L" veces lo que pesa el archivo comprimido (" +
+                TextoTamano(comprimido) + L").";
+            if (!Preguntar(motivo))
+            {
+                m_detenido = true;
+                return false;
+            }
+        }
+        if (!m_preguntoLibre && m_libreAlEmpezar > 0 && proyectado >= (1LL << 30)
+            && (double)proyectado > m_op.limites.parteDelLibre * (double)m_libreAlEmpezar)
+        {
+            m_preguntoLibre = true;
+            std::wstring motivo = L"Lo extraído llegaría a ocupar " + TextoTamano(proyectado) +
+                L", más de la mitad del espacio que estaba libre en el disco al empezar.";
+            if (!Preguntar(motivo))
+            {
+                m_detenido = true;
+                return false;
+            }
+        }
+        return true;
     }
 
     // Copia los datos de la entrada actual al archivo abierto en «w». Devuelve true si llegó al final completo.
@@ -726,7 +852,6 @@ namespace
     bool Extraccion::CopiarDatos(archive* w, archive_entry* e, const std::wstring& cruda, bool& fatal, bool& incompleto)
     {
         archive* a = m_lector->a;
-        const int64_t comprimido = std::max<int64_t>(m_lector->Total(), 1);
         const bool conTamano = archive_entry_size_is_set(e) && archive_entry_sparse_count(e) == 0;
         const int64_t tamano = conTamano ? archive_entry_size(e) : 0;
         int64_t hasta = 0;
@@ -753,7 +878,7 @@ namespace
             if (r < ARCHIVE_WARN)
             {
                 fatal = r == ARCHIVE_FATAL || m_lector->personaCancelo || m_lector->cancelado;
-                if (!fatal) Omitir(cruda, L"no se pudo leer." + Detalle(archive_error_string(a)));
+                if (!fatal) Omitir(cruda, L"no se pudo leer." + Detalle(archive_error_string(a)), Tipo::Falla);
                 return false;
             }
             if (m_cancelar) return false;
@@ -763,49 +888,112 @@ namespace
             {
                 int64_t libre = EspacioLibre(m_destino);
                 if (libre >= 0 && libre < (64LL << 20)) m_sinEspacio = true;
-                else Omitir(cruda, L"no se pudo escribir en el disco");
+                else Omitir(cruda, L"no se pudo escribir en el disco", Tipo::Falla);
                 return false;
             }
-            m_res.escritos += (int64_t)tam;
-            m_prog.escritos += (int64_t)tam;
+            if (!Controlar((int64_t)tam)) return false;
+        }
+    }
 
-            // Topes contra las bombas de descompresión
-            if (!m_preguntoProporcion && m_res.escritos >= m_op.limites.bytesMinimos
-                && (double)m_res.escritos > m_op.limites.proporcion * (double)comprimido)
+    // Un enlace duro sin datos propios se guarda como copia de lo que ya se extrajo en esta extracción. Se copia por
+    // bloques con los mismos topes que lo demás: miles de enlaces al mismo archivo grande serían una bomba.
+    // false: hay que parar (cancelar, bomba o sin espacio).
+    bool Extraccion::CopiarEnlace(const Hecho& origen, const std::wstring& relativa, const std::wstring& cruda)
+    {
+        std::wstring completa = rutas::Unir(m_destino, relativa);
+        HANDLE de = CreateFileW(rutas::Larga(origen.ruta).c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+                                FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
+        if (de == INVALID_HANDLE_VALUE || !(IdentidadDe(de) == origen.id))
+        {
+            if (de != INVALID_HANDLE_VALUE) CloseHandle(de);
+            Omitir(cruda, L"el archivo al que apunta cambió o ya no está; no se copió", Tipo::Falla);
+            return true;
+        }
+        LARGE_INTEGER tamano{};
+        GetFileSizeEx(de, &tamano);
+        if (!ControlarAntes(tamano.QuadPart))
+        {
+            CloseHandle(de);
+            return false;
+        }
+        if (!SigueSeguro(relativa))
+        {
+            CloseHandle(de);
+            Omitir(cruda, L"la carpeta cambió mientras se extraía; no se copió");
+            return true;
+        }
+        HANDLE a = CreateFileW(rutas::Larga(completa).c_str(), GENERIC_WRITE | DELETE, 0, nullptr, CREATE_NEW,
+                               FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
+        if (a == INVALID_HANDLE_VALUE)
+        {
+            CloseHandle(de);
+            Omitir(cruda, L"no se pudo crear la copia", Tipo::Falla);
+            return true;
+        }
+        std::vector<char> buf(TamanoBloque);
+        bool ok = true, parar = false;
+        for (;;)
+        {
+            if (m_cancelar)
             {
-                m_preguntoProporcion = true;
-                std::wstring motivo = L"Lo extraído ya ocupa " + TextoTamano(m_res.escritos) + L", más de " +
-                    TextoNumero(m_res.escritos / comprimido) + L" veces lo que pesa el archivo comprimido (" +
-                    TextoTamano(comprimido) + L").";
-                if (!Preguntar(motivo))
-                {
-                    m_detenido = true;
-                    return false;
-                }
+                ok = false;
+                parar = true;
+                break;
             }
-            if (m_res.escritos >= m_proximoChequeo)
+            DWORD leidos = 0, escritos = 0;
+            if (!ReadFile(de, buf.data(), (DWORD)buf.size(), &leidos, nullptr))
             {
-                m_proximoChequeo = m_res.escritos + (64LL << 20);
+                ok = false;
+                break;
+            }
+            if (leidos == 0) break;
+            if (!WriteFile(a, buf.data(), leidos, &escritos, nullptr) || escritos != leidos)
+            {
                 int64_t libre = EspacioLibre(m_destino);
-                if (libre >= 0 && libre < m_op.limites.libreMinimo)
+                if (libre >= 0 && libre < (64LL << 20))
                 {
                     m_sinEspacio = true;
-                    return false;
+                    parar = true;
                 }
-                if (!m_preguntoLibre && m_libreAlEmpezar > 0 && m_res.escritos >= (1LL << 30)
-                    && (double)m_res.escritos > m_op.limites.parteDelLibre * (double)m_libreAlEmpezar)
-                {
-                    m_preguntoLibre = true;
-                    std::wstring motivo = L"Lo extraído ya ocupa " + TextoTamano(m_res.escritos) +
-                        L", más de la mitad del espacio que estaba libre en el disco al empezar.";
-                    if (!Preguntar(motivo))
-                    {
-                        m_detenido = true;
-                        return false;
-                    }
-                }
+                ok = false;
+                break;
+            }
+            if (!Controlar(leidos))
+            {
+                ok = false;
+                parar = true;
+                break;
             }
         }
+        if (ok)
+        {
+            FILETIME creado, acceso, escrito;
+            if (GetFileTime(de, &creado, &acceso, &escrito)) SetFileTime(a, &creado, &acceso, &escrito);
+        }
+        else
+        {
+            // Lo creó esta extracción y se tiene abierto: se borra por su manejador, sin depender de la ruta
+            FILE_DISPOSITION_INFO borrar = {};
+            borrar.DeleteFile = TRUE;
+            if (SetFileInformationByHandle(a, FileDispositionInfo, &borrar, sizeof(borrar)))
+            {
+                if (parar) m_res.quitoAMedias = true;
+            }
+            else m_res.aMedias = completa;
+        }
+        Identidad id = IdentidadDe(a);
+        CloseHandle(a);
+        CloseHandle(de);
+        if (!ok)
+        {
+            if (!parar) Omitir(cruda, L"no se pudo copiar", Tipo::Falla);
+            return !parar;
+        }
+        m_res.archivos++;
+        m_prog.archivos++;
+        m_hechos[cruda] = { completa, id };
+        Marcar(completa, relativa);
+        return true;
     }
 
     Resumen Extraccion::Ejecutar()
@@ -817,7 +1005,11 @@ namespace
             m_res.mensaje = L"No hay nada que extraer.";
             return m_res;
         }
-        for (auto& p : m_op.partes) m_partesCompletas.push_back(RutaCompleta(p));
+        for (auto& p : m_op.partes)
+        {
+            m_partesCompletas.push_back(RutaCompleta(p));
+            m_idPartes.push_back(IdentidadDe(m_partesCompletas.back()));
+        }
         for (auto& e : m_op.elegidas)
         {
             std::wstring r = e;
@@ -843,7 +1035,7 @@ namespace
         {
             Lector lector(m_partesCompletas, m_prog, m_cancelar);
             m_lector = &lector;
-            if (!lector.Abrir(&m_pr))
+            if (!lector.Abrir(&m_pr, m_soloSuelto))
             {
                 Clasificar(lector, m_res.estado, m_res.mensaje);
             }
@@ -867,6 +1059,10 @@ namespace
                     int64_t numero = 0;
                     int fallasSeguidas = 0;
                     archive_entry* e = nullptr;
+                    auto carpetaCambio = [&]() {
+                        m_res.estado = Estado::Error;
+                        m_res.mensaje = L"Algo cambió la carpeta de trabajo en medio de la extracción; se detuvo por seguridad.";
+                    };
                     for (;;)
                     {
                         if (m_cancelar)
@@ -875,7 +1071,12 @@ namespace
                             break;
                         }
                         int r = archive_read_next_header(lector.a, &e);
-                        if (r == ARCHIVE_EOF) break;
+                        if (r == ARCHIVE_EOF)
+                        {
+                            m_tarVacio = numero == 0 && Formato(lector.a) == ARCHIVE_FORMAT_TAR
+                                && archive_filter_count(lector.a) > 1 && archive_filter_code(lector.a, 0) != ARCHIVE_FILTER_NONE;
+                            break;
+                        }
                         if (r == ARCHIVE_RETRY || r == ARCHIVE_FAILED)
                         {
                             if (++fallasSeguidas > 100)
@@ -884,7 +1085,8 @@ namespace
                                 m_res.mensaje = L"El archivo está dañado: demasiadas entradas que no se pueden leer.";
                                 break;
                             }
-                            if (r == ARCHIVE_FAILED && e) Omitir(RutaDeEntrada(e), L"está dañado." + Detalle(archive_error_string(lector.a)));
+                            if (r == ARCHIVE_FAILED && e)
+                                Omitir(RutaDeEntrada(e), L"está dañado." + Detalle(archive_error_string(lector.a)), Tipo::Falla);
                             continue;
                         }
                         if (r < ARCHIVE_WARN)
@@ -917,12 +1119,6 @@ namespace
                                 break;
                             }
                         }
-                        if (!trabajo.Sigue())
-                        {
-                            m_res.estado = Estado::Error;
-                            m_res.mensaje = L"Algo cambió la carpeta de trabajo en medio de la extracción; se detuvo por seguridad.";
-                            break;
-                        }
 
                         if (EsEnlaceSimbolico(e))
                         {
@@ -939,7 +1135,7 @@ namespace
                         }
                         if (archive_entry_is_data_encrypted(e) && Formato(lector.a) != ARCHIVE_FORMAT_ZIP)
                         {
-                            Omitir(cruda, L"tiene contraseña de un tipo que Jícaro no puede abrir");
+                            Omitir(cruda, L"tiene contraseña de un tipo que Jícaro no puede abrir", Tipo::Cifrado);
                             m_res.cifradas++;
                             m_formatoCifrado = Formato(lector.a);
                             continue;
@@ -950,12 +1146,22 @@ namespace
                             auto relativa = Preparar(cruda, true);
                             if (m_parar) break;
                             if (!relativa) continue;
+                            if (!trabajo.Sigue())
+                            {
+                                carpetaCambio();
+                                break;
+                            }
+                            if (!SigueSeguro(*relativa))
+                            {
+                                Omitir(cruda, L"la carpeta cambió mientras se extraía; no se tocó");
+                                continue;
+                            }
                             archive_entry* s = archive_entry_new();
                             archive_entry_copy_pathname_w(s, relativa->c_str());
                             archive_entry_set_filetype(s, AE_IFDIR);
                             archive_entry_set_perm(s, 0755);
                             CopiarFechas(e, s);
-                            if (archive_write_header(w, s) < ARCHIVE_WARN) Omitir(cruda, L"no se pudo crear la carpeta");
+                            if (archive_write_header(w, s) < ARCHIVE_WARN) Omitir(cruda, L"no se pudo crear la carpeta", Tipo::Falla);
                             else m_res.carpetas++;
                             archive_write_finish_entry(w);
                             archive_entry_free(s);
@@ -963,44 +1169,41 @@ namespace
                         }
 
                         // Enlace duro sin datos propios: se copia el archivo al que apunta, si ya se extrajo aquí
-                        std::wstring copiarDe;
+                        const Hecho* origen = nullptr;
                         if (duro && !conDatos)
                         {
                             auto it = m_hechos.find(DestinoDeEnlace(e));
-                            if (it == m_hechos.end() || !ExisteArchivo(it->second))
+                            if (it == m_hechos.end())
                             {
                                 Omitir(cruda, L"es un enlace a algo que no se extrajo; Jícaro no crea enlaces");
                                 continue;
                             }
-                            copiarDe = it->second;
+                            origen = &it->second;
                         }
+                        Hecho copiaOrigen = origen ? *origen : Hecho();
 
                         auto relativa = Preparar(cruda, false);
                         if (m_parar) break;
                         if (!relativa) continue;
                         std::wstring completa = rutas::Unir(m_destino, *relativa);
 
-                        if (!copiarDe.empty())
+                        if (origen)
                         {
-                            if (CopyFileW(rutas::Larga(copiarDe).c_str(), rutas::Larga(completa).c_str(), TRUE))
-                            {
-                                m_res.archivos++;
-                                m_prog.archivos++;
-                                m_hechos[cruda] = completa;
-                                Marcar(completa);
-                            }
-                            else Omitir(cruda, L"no se pudo copiar");
+                            if (!CopiarEnlace(copiaOrigen, *relativa, cruda)) break;
                             continue;
                         }
 
-                        if (archive_entry_size_is_set(e))
+                        // Topes con el tamaño anunciado (también el de los archivos con huecos)
+                        if (archive_entry_size_is_set(e) && !ControlarAntes(archive_entry_size(e))) break;
+                        if (!trabajo.Sigue())
                         {
-                            int64_t libre = EspacioLibre(m_destino);
-                            if (libre >= 0 && archive_entry_size(e) > libre - m_op.limites.libreMinimo)
-                            {
-                                m_sinEspacio = true;
-                                break;
-                            }
+                            carpetaCambio();
+                            break;
+                        }
+                        if (!SigueSeguro(*relativa) || GetFileAttributesW(rutas::Larga(completa).c_str()) != INVALID_FILE_ATTRIBUTES)
+                        {
+                            Omitir(cruda, L"la carpeta cambió mientras se extraía; no se tocó");
+                            continue;
                         }
 
                         archive_entry* s = archive_entry_new();
@@ -1011,9 +1214,20 @@ namespace
                         CopiarFechas(e, s);
                         if (archive_write_header(w, s) < ARCHIVE_WARN)
                         {
-                            Omitir(cruda, L"no se pudo crear el archivo");
+                            Omitir(cruda, L"no se pudo crear el archivo", Tipo::Falla);
                             archive_write_finish_entry(w);
                             archive_entry_free(s);
+                            continue;
+                        }
+                        // libarchive crea el archivo y lo tiene abierto sin compartir. Si no (porque justo apareció otro
+                        // con ese nombre), libarchive lo deja como estaba: Jícaro tampoco lo toca.
+                        Identidad id;
+                        if (AbiertoSinCompartir(completa)) id = IdentidadDe(completa);
+                        if (!id.ok)
+                        {
+                            archive_write_finish_entry(w);
+                            archive_entry_free(s);
+                            Omitir(cruda, L"apareció otro archivo con ese nombre mientras se extraía; no se tocó", Tipo::Falla);
                             continue;
                         }
                         bool fatal = false, incompleto = false;
@@ -1022,13 +1236,8 @@ namespace
                         archive_entry_free(s);
                         if (!completo || fin < ARCHIVE_WARN)
                         {
-                            // Lo que quedó a medias lo creó Jícaro en esta misma extracción: se quita
-                            DeleteFileW(rutas::Larga(completa).c_str());
-                            if (m_cancelar || m_detenido || m_sinEspacio)
-                            {
-                                m_res.quitoAMedias = true;
-                                break;
-                            }
+                            QuitarAMedias(completa, *relativa, id);
+                            if (m_cancelar || m_detenido || m_sinEspacio) break;
                             if (fatal)
                             {
                                 Clasificar(lector, m_res.estado, m_res.mensaje);
@@ -1042,16 +1251,16 @@ namespace
                                     Clasificar(lector, m_res.estado, m_res.mensaje);
                                     break;
                                 }
-                                Omitir(cruda, L"está incompleto o dañado");
+                                Omitir(cruda, L"está incompleto o dañado", Tipo::Falla);
                                 continue;
                             }
-                            if (completo) Omitir(cruda, L"no se pudo terminar de escribir");
+                            if (completo) Omitir(cruda, L"no se pudo terminar de escribir", Tipo::Falla);
                             continue;
                         }
                         m_res.archivos++;
                         m_prog.archivos++;
-                        m_hechos[cruda] = completa;
-                        Marcar(completa);
+                        m_hechos[cruda] = { completa, id };
+                        Marcar(completa, *relativa);
                     }
                     // Cierra antes de volver a la carpeta de trabajo anterior: aquí se ponen las fechas de las carpetas
                     archive_write_close(w);
@@ -1097,21 +1306,23 @@ namespace
     }
 }
 
-jicaro::Contenido jicaro::Listar(const std::vector<std::wstring>& partes, const std::wstring& nombreSuelto,
-                                 Progreso& progreso, const std::atomic<bool>& cancelar)
+static jicaro::Contenido ListarAdentro(const std::vector<std::wstring>& partes, const std::wstring& nombreSuelto,
+                                       jicaro::Progreso& progreso, const std::atomic<bool>& cancelar, bool soloSuelto)
 {
+    using namespace jicaro;
     Contenido c;
     progreso.Reiniciar();
     std::vector<std::wstring> completas;
     for (auto& p : partes) completas.push_back(RutaCompleta(p));
     Lector l(completas, progreso, cancelar);
-    if (!l.Abrir(nullptr))
+    if (!l.Abrir(nullptr, soloSuelto))
     {
         Clasificar(l, c.estado, c.mensaje);
         return c;
     }
     archive_entry* e = nullptr;
     int fallasSeguidas = 0;
+    size_t letras = 0;
     for (;;)
     {
         int r = archive_read_next_header(l.a, &e);
@@ -1157,6 +1368,7 @@ jicaro::Contenido jicaro::Listar(const std::vector<std::wstring>& partes, const 
         if (en.cifrada) c.cifradas++;
         progreso.PonerActual(en.ruta);
         progreso.archivos++;
+        letras += en.ruta.size();
         c.entradas.push_back(std::move(en));
         if (suelto)
         {
@@ -1165,10 +1377,11 @@ jicaro::Contenido jicaro::Listar(const std::vector<std::wstring>& partes, const 
             c.completo = true;
             break;
         }
-        if (c.entradas.size() >= 5000000)
+        // Topes para la memoria: con más que esto, la lista se muestra a medias (extraer todo sigue funcionando)
+        if (c.entradas.size() >= 1000000 || letras >= (64u << 20))
         {
             c.estado = Estado::Bien;
-            c.mensaje = L"El archivo trae demasiados archivos para mostrarlos todos.";
+            c.mensaje = L"El archivo trae demasiados archivos para mostrarlos todos: la lista está a medias. «Extraer todo» funciona igual.";
             c.formato = NombreFormato(l.a);
             return c;
         }
@@ -1179,11 +1392,60 @@ jicaro::Contenido jicaro::Listar(const std::vector<std::wstring>& partes, const 
     return c;
 }
 
+jicaro::Contenido jicaro::Listar(const std::vector<std::wstring>& partes, const std::wstring& nombreSuelto,
+                                 Progreso& progreso, const std::atomic<bool>& cancelar)
+{
+    try
+    {
+        Contenido c = ListarAdentro(partes, nombreSuelto, progreso, cancelar, false);
+        // Un .gz de un archivo que empieza con ceros parece un TAR vacío: si el nombre no dice TAR, se lee como suelto
+        if (c.completo && c.entradas.empty() && c.formato.rfind(L"TAR + ", 0) == 0 && !nombreSuelto.empty()
+            && !TerminaSinMayusculas(nombreSuelto, L".tar"))
+            c = ListarAdentro(partes, nombreSuelto, progreso, cancelar, true);
+        return c;
+    }
+    catch (const std::bad_alloc&)
+    {
+        Contenido c;
+        c.mensaje = L"No alcanzó la memoria para leer la lista de este archivo.";
+        return c;
+    }
+    catch (...)
+    {
+        Contenido c;
+        c.mensaje = L"Algo salió mal al leer este archivo.";
+        return c;
+    }
+}
+
 jicaro::Resumen jicaro::Extraer(const Opciones& opciones, Preguntas& preguntas, Progreso& progreso,
                                 const std::atomic<bool>& cancelar)
 {
-    Extraccion x(opciones, preguntas, progreso, cancelar);
-    return x.Ejecutar();
+    try
+    {
+        Extraccion x(opciones, preguntas, progreso, cancelar);
+        Resumen r = x.Ejecutar();
+        // Un .gz de un archivo que empieza con ceros parece un TAR vacío: si el nombre no dice TAR, se lee como suelto
+        if (x.TarVacio() && r.estado == Estado::Bien && r.archivos == 0 && r.omitidas.empty() && !opciones.nombreSuelto.empty()
+            && !TerminaSinMayusculas(opciones.nombreSuelto, L".tar"))
+        {
+            Extraccion suelto(opciones, preguntas, progreso, cancelar, true);
+            r = suelto.Ejecutar();
+        }
+        return r;
+    }
+    catch (const std::bad_alloc&)
+    {
+        Resumen r;
+        r.mensaje = L"No alcanzó la memoria para extraer este archivo.";
+        return r;
+    }
+    catch (...)
+    {
+        Resumen r;
+        r.mensaje = L"Algo salió mal al extraer.";
+        return r;
+    }
 }
 
 std::wstring jicaro::TextoEstado(Estado estado)

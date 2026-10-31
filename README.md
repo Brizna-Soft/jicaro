@@ -53,18 +53,23 @@ Los archivos comprimidos pueden venir con trampas. Jícaro las frena:
   su propia revisión además de usar las protecciones de libarchive: en las pruebas, libarchive sola dejaba pasar una
   ruta como `\Users\...\archivo.txt`.
 - **No crea enlaces.** Los enlaces simbólicos y los enlaces duros que traiga el archivo no se crean, y no escribe a
-  través de un enlace o una unión que ya estuviera en la carpeta. Un enlace duro a otro archivo del mismo comprimido
-  se guarda como copia.
+  través de un enlace o una unión que ya estuviera en la carpeta: revisa todo el camino antes de escribir cada archivo.
+  Un enlace duro a otro archivo del mismo comprimido se guarda como copia.
 - **Bombas de descompresión** (archivos chiquitos hechos para llenar el disco): pregunta antes de seguir si lo
   extraído pasa de 512 MB y de 100 veces lo que pesa el comprimido, si ya ocupa más de la mitad del espacio libre que
-  había o si trae más de 200,000 archivos. Se detiene solo si el disco queda con menos de 512 MB libres. Lo que quede a
-  medias al detenerse se quita.
+  había o si trae más de 200,000 archivos. Cuando el archivo anuncia el tamaño, pregunta antes de crearlo; también
+  cuentan los archivos «con huecos» y las copias de enlaces duros. Se detiene solo si el disco queda con menos de
+  512 MB libres. Lo que quede a medias al detenerse se quita, pero solo si es el mismo archivo que creó Jícaro (lo
+  comprueba con el identificador que le da Windows).
 - **Marca de la Web.** Si el archivo comprimido se bajó de internet, lo que extraes queda marcado igual, como hace
   Windows con sus propios ZIP. Así Windows y tu antivirus siguen avisando antes de abrir programas que vienen de
   internet. Se hace como indica Microsoft: los programas y scripts pasan por los servicios de adjuntos de Windows
   (`IAttachmentExecute`, con el comprimido como origen), que además avisan al antivirus; lo demás recibe la misma
   marca con `IZoneIdentifier`.
-- **Nunca reemplaza el archivo que está leyendo**, ni borra nada sin preguntar: lo que se reemplaza va a la Papelera.
+- **Nunca reemplaza el archivo que está leyendo**, aunque la entrada use su nombre corto (como `JUEGO~1.RAR`), ni
+  borra nada sin preguntar: lo que se reemplaza va a la Papelera.
+- **«Extraer en una carpeta con su nombre»** no reutiliza un enlace o una unión que ya tenga ese nombre: en ese caso
+  usa otro, como `juego (2)`.
 
 ## Privacidad
 
@@ -88,7 +93,8 @@ Jicaro.exe --extraer "<archivo>" [--destino "<carpeta>" | --aqui] [--si-existe p
 - Sin `--si-existe`, usa lo que la persona eligió en Ajustes.
 
 Códigos de salida: `0` bien · `1` error · `2` cancelado · `3` falta una parte · `4` contraseña o cifrado que no se
-puede abrir · `5` otra ventana de Jícaro ya está extrayendo ese archivo.
+puede abrir · `5` otra ventana de Jícaro ya está extrayendo ese archivo · `6` salió solo una parte (algo se saltó
+por seguridad o no se pudo extraer).
 
 También: `Jicaro.exe --registrar-menu` y `Jicaro.exe --quitar-menu` ponen y quitan el clic derecho.
 

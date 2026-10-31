@@ -13,6 +13,7 @@
 #include <windows.h>
 
 #include <wx/app.h>
+#include <wx/log.h>
 
 #include <clocale>
 #include <optional>
@@ -123,6 +124,8 @@ bool Aplicacion::OnInit()
         return true;
     }
 
+    // wxWidgets avisa de sus propias fallas internas con ventanas en inglés: esas van al registro, no a la pantalla
+    delete wxLog::SetActiveTarget(new wxLogStderr());
     MSWEnableDarkMode();   // claro u oscuro, como Windows
     SetAppDisplayName(wxString::FromUTF8(APP_NOMBRE));
     // Si la persona movió la carpeta del programa, el clic derecho se registra de nuevo con la ruta nueva

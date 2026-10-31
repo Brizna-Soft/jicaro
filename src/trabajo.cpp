@@ -71,7 +71,15 @@ void Trabajo::Listar(std::vector<std::wstring> partes, std::wstring nombreSuelto
     m_ocupado = true;
     auto vivo = m_vivo;
     m_hilo = std::thread([this, partes = std::move(partes), nombreSuelto = std::move(nombreSuelto), alTerminar, vivo]() {
-        auto c = std::make_shared<jicaro::Contenido>(jicaro::Listar(partes, nombreSuelto, m_progreso, m_cancelar));
+        auto c = std::make_shared<jicaro::Contenido>();
+        try
+        {
+            *c = jicaro::Listar(partes, nombreSuelto, m_progreso, m_cancelar);
+        }
+        catch (...)
+        {
+            c->mensaje = L"Algo salió mal al leer este archivo.";
+        }
         jicaro::hilos::Enviar([this, c, alTerminar, vivo]() {
             if (!*vivo) return;
             m_ocupado = false;
@@ -108,10 +116,18 @@ void Trabajo::Extraer(jicaro::Opciones opciones, std::function<void(jicaro::Resu
         pr.bomba = [this, ventana](const std::wstring& motivo) {
             return Preguntar<bool>([=]() { return dialogos::PreguntarBomba(ventana, motivo); }, false);
         };
-        auto r = std::make_shared<jicaro::Resumen>(jicaro::Extraer(op, pr, m_progreso, m_cancelar));
-        jicaro::Registrar("extraer: " + jicaro::Utf8(jicaro::TextoEstado(r->estado)) + " (" + std::to_string(op.partes.size()) +
-                          " partes, " + std::to_string(r->archivos) + " archivos, " + std::to_string(r->omitidas.size()) +
-                          " omitidos, marca " + std::to_string(r->zona) + ")");
+        auto r = std::make_shared<jicaro::Resumen>();
+        try
+        {
+            *r = jicaro::Extraer(op, pr, m_progreso, m_cancelar);
+            jicaro::Registrar("extraer: " + jicaro::Utf8(jicaro::TextoEstado(r->estado)) + " (" + std::to_string(op.partes.size()) +
+                              " partes, " + std::to_string(r->archivos) + " archivos, " + std::to_string(r->rechazados) +
+                              " por seguridad, " + std::to_string(r->fallidos) + " con fallas, marca " + std::to_string(r->zona) + ")");
+        }
+        catch (...)
+        {
+            r->mensaje = L"Algo salió mal al extraer.";
+        }
         jicaro::hilos::Enviar([this, r, alTerminar, vivo]() {
             if (!*vivo) return;
             m_ocupado = false;

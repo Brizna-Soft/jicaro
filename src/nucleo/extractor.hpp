@@ -117,6 +117,12 @@ namespace jicaro
     {
         std::wstring ruta;
         std::wstring motivo;
+        enum class Tipo
+        {
+            Seguridad,   // ruta peligrosa, enlace, dispositivo: se salta a propósito
+            Cifrado,     // contraseña de un tipo que libarchive no abre
+            Falla,       // no se pudo leer, escribir o copiar
+        } tipo = Tipo::Seguridad;
     };
 
     struct Resumen
@@ -125,10 +131,19 @@ namespace jicaro
         std::wstring mensaje;               // para la persona
         int64_t archivos = 0, carpetas = 0, saltados = 0, escritos = 0;
         int64_t cifradas = 0;               // con contraseña de un tipo que libarchive no abre (RAR, 7z)
-        std::vector<Omitida> omitidas;      // rutas peligrosas, enlaces y errores de cada archivo
+        int64_t rechazados = 0;             // saltados por seguridad
+        int64_t fallidos = 0;               // que no se pudieron extraer por un error
+        std::vector<Omitida> omitidas;      // todo lo anterior, con su ruta y su motivo
         unsigned long zona = 0;             // 3 o 4 si se pasó la marca de la Web
         int64_t marcados = 0, sinMarca = 0, quitadosPorWindows = 0;
         bool quitoAMedias = false;          // se borró el archivo que quedó a medias al detenerse
+        std::wstring aMedias;               // archivo a medias que no se pudo borrar (vacío si no hay)
+
+        // Salió todo lo que se pidió, sin avisos
+        bool Limpio() const
+        {
+            return estado == Estado::Bien && omitidas.empty() && sinMarca == 0 && quitadosPorWindows == 0 && aMedias.empty();
+        }
     };
 
     // Lee la lista del contenido. «nombreSuelto» se usa para un .gz de un solo archivo.

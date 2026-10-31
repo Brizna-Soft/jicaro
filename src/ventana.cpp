@@ -420,8 +420,7 @@ void VentanaPrincipal::Extraer(bool soloElegido)
         }
     }
 
-    std::wstring carpeta = jicaro::rutas::Unir(m_juego.carpeta, m_juego.nombreBase);
-    if (jicaro::ExisteArchivo(carpeta)) carpeta = jicaro::rutas::NombreLibre(carpeta);
+    std::wstring carpeta = jicaro::rutas::CarpetaNuevaSegura(m_juego.carpeta, m_juego.nombreBase);
     jicaro::SiExiste siExiste = m_ajustes.siExiste;
     bool abrir = m_ajustes.abrirCarpeta;
     if (!dialogos::ElegirDestino(this, soloElegido ? L"Extraer lo elegido" : L"Extraer todo", carpeta, siExiste, abrir)) return;
@@ -472,7 +471,7 @@ void VentanaPrincipal::AlTerminarExtraccion(const jicaro::Resumen& r, const std:
         Close();
         return;
     }
-    bool limpio = r.estado == jicaro::Estado::Bien && r.omitidas.empty() && r.cifradas == 0;
+    bool limpio = r.Limpio();
     if (limpio)
     {
         Liberar(dialogos::TextoResumen(r, destino).BeforeFirst(L'\n'));

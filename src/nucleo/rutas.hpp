@@ -39,6 +39,13 @@ namespace jicaro::rutas
     // simbólico ni una unión (junction), porque desviaría lo extraído a otro lugar. «donde» dice cuál falló.
     bool SinDesvios(const std::wstring& carpeta, const std::wstring& relativa, std::wstring* donde = nullptr);
 
+    // ¿La ruta misma (su último tramo) es un enlace simbólico o una unión?
+    bool EsDesvio(const std::wstring& ruta);
+
+    // Carpeta nueva «carpeta\nombre» para «Extraer en una carpeta con su nombre»: si ya hay un archivo, un enlace o una
+    // unión con ese nombre, busca otro nombre libre («nombre (2)»)
+    std::wstring CarpetaNuevaSegura(const std::wstring& carpeta, const std::wstring& nombre);
+
     // La ruta con «\\?\» delante cuando hace falta para pasar de 260 caracteres
     std::wstring Larga(const std::wstring& ruta);
 

@@ -791,8 +791,28 @@ namespace
             };
             std::wstring d = Carpeta(L"salida\\bomba-detenida");
             auto r = Extraer(p, bomba, d);
-            Revisar(r.estado == jicaro::Estado::Detenido && p.pidioBomba == 1 && r.quitoAMedias && !ExisteArchivo(d + L"\\ceros.bin"),
-                    L"pregunta una vez, se detiene y quita el archivo a medias " + Texto(r));
+            Revisar(r.estado == jicaro::Estado::Detenido && p.pidioBomba == 1 && !ExisteArchivo(d + L"\\ceros.bin"),
+                    L"el ZIP anuncia 600 MB: pregunta una vez antes de crear el archivo y se detiene " + Texto(r));
+            wprintf(L"  pregunta: %ls\n", motivo.c_str());
+        }
+        // Un .gz no anuncia su tamaño: la pregunta llega mientras se escribe, y lo que quedó a medias se quita
+        {
+            std::wstring gz = c + L"\\bomba-chica.bin.gz";
+            Armar(gz, { { L"data", "", Item::Archivo, L"", 600LL << 20 } }, [](archive* a) {
+                archive_write_set_format_raw(a);
+                archive_write_add_filter_gzip(a);
+            });
+            Prueba p;
+            std::wstring motivo;
+            p.pr.bomba = [&p, &motivo](const std::wstring& m) {
+                p.pidioBomba++;
+                motivo = m;
+                return false;
+            };
+            std::wstring d = Carpeta(L"salida\\bomba-gz");
+            auto r = Extraer(p, gz, d);
+            Revisar(r.estado == jicaro::Estado::Detenido && p.pidioBomba == 1 && r.quitoAMedias && !ExisteArchivo(d + L"\\bomba-chica.bin"),
+                    L"un .gz sin tamaño: pregunta al pasar de 512 MB y quita el archivo a medias " + Texto(r));
             wprintf(L"  pregunta: %ls\n", motivo.c_str());
         }
         // Si la persona dice «Seguir», termina
@@ -948,7 +968,150 @@ namespace
         wprintf(L"  (dato) marca de un .exe extraído: %hs\n", zona.c_str());
         CoUninitialize();
     }
-}
+
+    // Lo que señaló la revisión de Codex
+    void PruebasDeLaRevision()
+    {
+        wprintf(L"\nArreglos de la revisión\n");
+        std::wstring c = Carpeta(L"revision");
+
+        // 1. Bomba hecha con enlaces duros: un archivo de 32 MB y 40 enlaces a él (cada uno sería otra copia)
+        {
+            std::vector<Item> items = { { L"grande.bin", "", Item::Archivo, L"", 32LL << 20 } };
+            for (int i = 0; i < 40; i++) items.push_back({ L"copia-" + std::to_wstring(i) + L".bin", "", Item::Duro, L"grande.bin" });
+            Armar(c + L"\\enlaces-bomba.tar.gz", items, [](archive* a) {
+                archive_write_set_format_pax_restricted(a);
+                archive_write_add_filter_gzip(a);
+            });
+            Prueba p;
+            p.op.limites.bytesMinimos = 64LL << 20;
+            p.pr.bomba = [&p](const std::wstring&) {
+                p.pidioBomba++;
+                return false;
+            };
+            std::wstring d = Carpeta(L"salida\\enlaces-bomba");
+            auto r = Extraer(p, c + L"\\enlaces-bomba.tar.gz", d);
+            Revisar(r.estado == jicaro::Estado::Detenido && p.pidioBomba == 1 && ContarArchivos(d) <= 2,
+                    L"los enlaces duros copiados también cuentan para la bomba " + Texto(r));
+        }
+
+        // 2. Archivo con huecos: anuncia 2 GB con solo 4 KB de datos. Se pregunta antes de crearlo.
+        {
+            std::wstring archivo = c + L"\\huecos.tar";
+            archive* a = archive_write_new();
+            archive_write_set_format_pax(a);
+            archive_write_open_filename_w(a, archivo.c_str());
+            archive_entry* e = archive_entry_new();
+            archive_entry_copy_pathname_w(e, L"disco-vacio.img");
+            archive_entry_set_filetype(e, AE_IFREG);
+            archive_entry_set_perm(e, 0644);
+            archive_entry_set_size(e, 2LL << 30);
+            archive_entry_sparse_add_entry(e, 0, 4096);
+            archive_write_header(a, e);
+            std::string datos(4096, 'x');
+            archive_write_data(a, datos.data(), datos.size());
+            archive_entry_free(e);
+            archive_write_close(a);
+            archive_write_free(a);
+            Prueba p;
+            std::wstring motivo;
+            p.pr.bomba = [&p, &motivo](const std::wstring& m) {
+                p.pidioBomba++;
+                motivo = m;
+                return false;
+            };
+            std::wstring d = Carpeta(L"salida\\huecos");
+            auto r = Extraer(p, archivo, d);
+            Revisar(r.estado == jicaro::Estado::Detenido && p.pidioBomba == 1 && !ExisteArchivo(d + L"\\disco-vacio.img"),
+                    L"un archivo con huecos que anuncia 2 GB pregunta antes de crearlo " + Texto(r));
+            wprintf(L"  pregunta: %ls\n", motivo.c_str());
+        }
+
+        // 3. Nombre corto 8.3: una entrada con el nombre corto del mismo archivo que se está leyendo
+        {
+            std::wstring carpeta = Carpeta(L"corto");
+            std::wstring largo = carpeta + L"\\archivo con nombre bastante largo.zip";
+            Armar(largo, { { L"x.txt", "x" } }, [](archive* a) { archive_write_set_format_zip(a); });
+            wchar_t corto[MAX_PATH] = {};
+            GetShortPathNameW(largo.c_str(), corto, MAX_PATH);
+            std::wstring nombreCorto = NombreDe(corto);
+            if (nombreCorto.empty() || IgualesSinMayusculas(nombreCorto, NombreDe(largo)))
+                wprintf(L"  (este disco no tiene nombres cortos 8.3: no se probó)\n");
+            else
+            {
+                // El mismo .zip, ahora con una entrada que se llama como su nombre corto
+                std::wstring temporal = Carpeta(L"corto-armado") + L"\\t.zip";
+                Armar(temporal, { { nombreCorto, "intento de pisar el archivo que se lee" } }, [](archive* a) { archive_write_set_format_zip(a); });
+                CopyFileW(temporal.c_str(), largo.c_str(), FALSE);
+                int64_t antes = TamanoArchivo(largo);
+                std::wstring papelera = Carpeta(L"papelera-corto");
+                int mandados = 0;
+                pruebas::papelera = [&](const std::wstring& ruta) {
+                    mandados++;
+                    return MoveFileW(ruta.c_str(), (papelera + L"\\" + NombreDe(ruta)).c_str()) != FALSE;
+                };
+                Prueba p;
+                p.op.siExiste = SiExiste::Reemplazar;
+                auto r = Extraer(p, largo, carpeta);
+                pruebas::papelera = nullptr;
+                Revisar(mandados == 0 && TamanoArchivo(largo) == antes && r.archivos == 1,
+                        L"no manda a la Papelera el archivo que lee aunque la entrada use su nombre corto («" + nombreCorto + L"») " + Texto(r));
+            }
+        }
+
+        // 4. Dos nombres que quedan iguales al limpiarlos («a:b» y «a_b»), y un enlace al primero después del reemplazo
+        {
+            Armar(c + L"\\colision.tar",
+                  { { L"dir/a:b.txt", "primero" }, { L"dir/a_b.txt", "segundo" }, { L"enlace.txt", "", Item::Duro, L"dir/a:b.txt" } },
+                  [](archive* a) { archive_write_set_format_pax_restricted(a); });
+            std::wstring papelera = Carpeta(L"papelera-colision");
+            pruebas::papelera = [&](const std::wstring& ruta) {
+                return MoveFileW(ruta.c_str(), (papelera + L"\\" + NombreDe(ruta)).c_str()) != FALSE;
+            };
+            Prueba p;
+            p.op.siExiste = SiExiste::Reemplazar;
+            std::wstring d = Carpeta(L"salida\\colision");
+            auto r = Extraer(p, c + L"\\colision.tar", d);
+            pruebas::papelera = nullptr;
+            std::string enlace;
+            bool hayEnlace = LeerTodo(d + L"\\enlace.txt", enlace);
+            Revisar(r.estado == jicaro::Estado::Bien && (!hayEnlace || enlace == "primero") && Omitio(r, L"enlace.txt"),
+                    L"el enlace no copia el contenido equivocado después de un reemplazo " + Texto(r));
+        }
+
+        // 5. Identidad en el disco y borrado solo del mismo objeto
+        {
+            std::wstring a1 = c + L"\\identidad.txt";
+            EscribirTodo(a1, "uno");
+            Identidad id1 = IdentidadDe(a1);
+            Revisar(id1.ok && IdentidadDe(a1) == id1, L"la identidad de un archivo es estable");
+            DeleteFileW(a1.c_str());
+            EscribirTodo(a1, "otro");
+            Revisar(!BorrarSiEsElMismo(a1, id1) && ExisteArchivo(a1), L"no borra un archivo distinto que quedó con el mismo nombre");
+            Revisar(BorrarSiEsElMismo(a1, IdentidadDe(a1)) && !ExisteArchivo(a1), L"borra el mismo objeto");
+            EscribirTodo(a1, "abierto");
+            HANDLE h = CreateFileW(a1.c_str(), GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr);
+            Revisar(AbiertoSinCompartir(a1), L"ve que otro lo tiene abierto sin compartir (como libarchive al crearlo)");
+            CloseHandle(h);
+            Revisar(!AbiertoSinCompartir(a1), L"y que ya nadie lo tiene abierto");
+        }
+
+        // 6. «Extraer en una carpeta con su nombre» no usa una unión que ya tenga ese nombre
+        {
+            std::wstring base = Carpeta(L"carpeta-con-union");
+            std::wstring afuera = Carpeta(L"carpeta-con-union-afuera");
+            _wsystem((L"cmd.exe /d /c mklink /J \"" + base + L"\\juego\" \"" + afuera + L"\" >nul").c_str());
+            std::wstring elegida = rutas::CarpetaNuevaSegura(base, L"juego");
+            Revisar(elegida == base + L"\\juego (2)", L"si ya hay una unión con el nombre del archivo, usa «juego (2)»");
+            RemoveDirectoryW((base + L"\\juego").c_str());   // solo la unión
+        }
+
+        // 7. Cuántos se saltaron por seguridad y cuántos fallaron, para el código de salida
+        {
+            auto r = ExtraerSimple(trabajo + L"\\malos\\malo-puntos.zip", Carpeta(L"salida\\cuentas"));
+            Revisar(r.rechazados == 4 && r.fallidos == 0 && !r.Limpio(), L"«../» cuenta como saltado por seguridad " + Texto(r));
+        }
+    }}
 
 int wmain(int argc, wchar_t** argv)
 {
@@ -1001,6 +1164,7 @@ int wmain(int argc, wchar_t** argv)
     PruebasDeBomba();
     PruebasSiExiste();
     PruebasDeMarca();
+    PruebasDeLaRevision();
 
     wprintf(L"\n%d pruebas, %d fallas\n", hechas, fallas);
     return fallas;

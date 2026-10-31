@@ -34,6 +34,25 @@ namespace jicaro
 
     // Manda un archivo a la Papelera. Si el disco no tiene Papelera, Windows pregunta antes de borrarlo.
     bool MandarAPapelera(const std::wstring& ruta);
+
+    // Identidad de un archivo en el disco (volumen e identificador de NTFS): dos rutas distintas, como el nombre largo
+    // y el corto 8.3, dan la misma identidad si son el mismo archivo. No sigue enlaces.
+    struct Identidad
+    {
+        uint64_t volumen = 0;
+        unsigned char id[16] = {};
+        bool ok = false;
+        bool operator==(const Identidad& o) const;
+    };
+    Identidad IdentidadDe(const std::wstring& ruta);
+    Identidad IdentidadDe(void* manejador);
+
+    // ¿Otro manejador tiene el archivo abierto sin compartir? (libarchive abre así los archivos que crea)
+    bool AbiertoSinCompartir(const std::wstring& ruta);
+
+    // Borra el archivo solo si sigue siendo el mismo objeto (misma identidad), por su manejador: si alguien cambió la
+    // ruta por otra cosa, no se toca. true si se borró.
+    bool BorrarSiEsElMismo(const std::wstring& ruta, const Identidad& identidad);
 }
 
 #ifdef JICARO_PRUEBAS

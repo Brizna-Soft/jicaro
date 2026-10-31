@@ -170,6 +170,22 @@ bool jicaro::rutas::SinDesvios(const std::wstring& carpeta, const std::wstring& 
     return true;
 }
 
+bool jicaro::rutas::EsDesvio(const std::wstring& ruta)
+{
+    WIN32_FIND_DATAW d;
+    HANDLE h = FindFirstFileExW(Larga(ruta).c_str(), FindExInfoBasic, &d, FindExSearchNameMatch, nullptr, 0);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    FindClose(h);
+    return (d.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) && IsReparseTagNameSurrogate(d.dwReserved0);
+}
+
+std::wstring jicaro::rutas::CarpetaNuevaSegura(const std::wstring& carpeta, const std::wstring& nombre)
+{
+    std::wstring c = Unir(carpeta, nombre);
+    if (ExisteArchivo(c) || EsDesvio(c)) c = NombreLibre(c);
+    return c;
+}
+
 std::wstring jicaro::rutas::Larga(const std::wstring& ruta)
 {
     if (ruta.size() < 240 || ruta.rfind(L"\\\\?\\", 0) == 0) return ruta;
