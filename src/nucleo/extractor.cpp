@@ -1453,6 +1453,15 @@ namespace
 
         motor7z::Paso Empieza(uint32_t indice) override
         {
+            // Si 7z.dll empieza otro sin haber dicho cómo terminó el anterior, el anterior se da por fallido (se quita)
+            if (m_activo)
+            {
+                m_activo = false;
+                archive_write_finish_entry(m_w);
+                x.m_enCurso.activo = false;
+                x.QuitarAMedias(m_completa, m_relativa, x.m_enCurso.id);
+                x.Omitir(m_cruda, L"no se terminó de extraer", Tipo::Falla);
+            }
             if (x.m_cancelar || indice >= m_items.size()) return motor7z::Paso::Parar;
             const auto& it = m_items[indice];
             m_cruda = it.ruta;
