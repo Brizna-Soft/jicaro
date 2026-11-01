@@ -1583,10 +1583,13 @@ namespace
             }
         }
 
+        // El primero que se va a pedir: 7z pide la contraseña antes de empezar el primer archivo de cada bloque
+        std::wstring proximo;
+
         std::optional<std::wstring> Clave() override
         {
             if (x.m_cancelar) return std::nullopt;
-            auto c = x.PedirClave(m_cruda, false);
+            auto c = x.PedirClave(m_cruda.empty() ? proximo : m_cruda, false);
             if (!c) sinClave = true;
             return c;
         }
@@ -1733,6 +1736,7 @@ namespace
         }
 
         Destino7z d(*this, arc, trabajo, w);
+        if (!pedir.empty()) d.proximo = items[pedir.front()].ruta;
         HRESULT hr = arc.Extraer(pedir, d);
         d.Despues(hr);
         // Los que no salieron porque la contraseña no sirvió: se pregunta otra (si hay a quién) y se prueban solo esos.
