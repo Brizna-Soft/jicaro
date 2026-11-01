@@ -78,7 +78,13 @@ Paso 'Compilando'
 & $cmake --build $build --config Release --parallel
 if ($LASTEXITCODE -ne 0) { throw "Falló la compilación (código $LASTEXITCODE)" }
 
+# 7z.dll (de 7-Zip) va junto a Jicaro.exe y junto a las pruebas: con ella se abren los RAR y los 7z
+Paso 'Trayendo 7z.dll de 7-Zip (versión fija, con su huella)'
+& (Join-Path $codigo 'traer-7zip.ps1') -Destino (Join-Path $build '7zip')
+Copy-Item (Join-Path $build '7zip\7z.dll') (Join-Path $build 'Release') -Force
+
 Paso 'Copiando el programa'
 New-Item -ItemType Directory -Force $programa | Out-Null
 Copy-Item (Join-Path $build 'Release\Jicaro.exe') $programa -Force
+Copy-Item (Join-Path $build '7zip\7z.dll') $programa -Force
 Write-Host "Listo: $programa" -ForegroundColor Green

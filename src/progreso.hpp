@@ -8,6 +8,7 @@
 #include <wx/timer.h>
 
 #include <chrono>
+#include <optional>
 #include <string>
 
 #include "extractor.hpp"
@@ -27,9 +28,10 @@ enum CodigoSalida
     SALIDA_ERROR = 1,
     SALIDA_CANCELADO = 2,
     SALIDA_FALTA_PARTE = 3,
-    SALIDA_CONTRASENA = 4,      // pide una contraseña que no se dio, o un cifrado que Jícaro no abre
+    SALIDA_CONTRASENA = 4,      // hace falta una contraseña y no se dio, o es un cifrado que Jícaro no abre
     SALIDA_YA_EXTRAYENDO = 5,   // otra ventana de Jícaro ya está extrayendo ese mismo archivo
     SALIDA_PARCIAL = 6,         // salió solo una parte: algo se saltó por seguridad o no se pudo extraer
+    SALIDA_CONTRASENA_MALA = 7, // se dio una contraseña y no sirvió (para todo o para una parte)
 };
 
 // La pone la ventana de progreso; la devuelve el programa al terminar
@@ -40,7 +42,10 @@ class VentanaProgreso : public wxFrame
 public:
     enum class Modo { Carpeta, Aqui, Destino };
 
-    VentanaProgreso(const std::wstring& archivo, Modo modo, const std::wstring& destino, jicaro::SiExiste siExiste);
+    // «clave»: la que llegó por --contrasena-stdin. Con ella no se muestran preguntas de contraseña: si no sirve, sale
+    // con SALIDA_CONTRASENA_MALA.
+    VentanaProgreso(const std::wstring& archivo, Modo modo, const std::wstring& destino, jicaro::SiExiste siExiste,
+                    std::optional<std::wstring> clave = std::nullopt, bool claveDeStdin = false);
     ~VentanaProgreso() override;
 
     // false si no hay nada que hacer (por ejemplo, otra ventana ya extrae ese archivo): no se muestra
@@ -62,6 +67,8 @@ private:
     bool m_terminado = false, m_cerrarAlTerminar = false;
     std::chrono::steady_clock::time_point m_inicio;
     void* m_candado = nullptr;   // mutex con nombre: una sola ventana por archivo
+    std::optional<std::wstring> m_clave;
+    bool m_claveDeStdin = false;
 
     wxPanel* m_panel = nullptr;
     wxStaticText* m_titulo = nullptr;

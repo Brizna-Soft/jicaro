@@ -1,8 +1,11 @@
 // Pruebas del núcleo de Jícaro con archivos de verdad (sin ventana).
 //
 // Uso: prueba-nucleo.exe <carpeta con los .uu de la suite de pruebas de libarchive> <carpeta de trabajo nueva>
+//                         [<carpeta con Rar.EncryptedParts.part01.rar ... part06.rar de SharpCompress>]
 //
 // 1. Saca de la suite de libarchive (licencia BSD) los RAR, RAR 5 en varias partes, 7z, ZIP con contraseña, CAB e ISO.
+//    Los RAR y 7z se leen con 7z.dll (tiene que estar junto a este programa); también se prueba sin ella.
+//    Los RAR 4 cifrados en 6 partes son de las pruebas de SharpCompress (licencia MIT; contraseña «test»).
 // 2. Arma archivos propios con libarchive: ZIP, TAR (también .gz, .bz2, .xz y .zst), 7z, ISO, ZIP con contraseña y
 //    archivos malos: con «../», con rutas absolutas, con enlaces, con nombres raros y una bomba chica.
 // 3. Los extrae con el mismo código del programa y revisa el resultado, y que nada salga de la carpeta de destino.
@@ -30,6 +33,7 @@
 #include "comun.hpp"
 #include "extractor.hpp"
 #include "marca.hpp"
+#include "motor7z.hpp"
 #include "rutas.hpp"
 #include "volumenes.hpp"
 
@@ -38,7 +42,7 @@ using namespace jicaro;
 namespace
 {
     int hechas = 0, fallas = 0;
-    std::wstring suite, trabajo;
+    std::wstring suite, trabajo, sharp;
 
     void Revisar(bool ok, const std::wstring& que)
     {
@@ -617,10 +621,18 @@ namespace
         std::wstring u = Carpeta(L"sin-ultima");
         for (int i = 1; i <= 7; i++) CopyFileW(rar5[i - 1].c_str(), (u + L"\\corto.part0" + std::to_wstring(i) + L".rar").c_str(), FALSE);
         r = ExtraerSimple(u + L"\\corto.part01.rar", Carpeta(L"salida\\sin-ultima"));
-        Revisar(r.estado == jicaro::Estado::FaltaParte && r.mensaje.find(L"corto.part07.rar") != std::wstring::npos,
-                L"sin la última parte avisa que falta la que sigue a la 7 " + Texto(r));
+        Revisar(r.estado == jicaro::Estado::FaltaParte && r.mensaje.find(L"corto.part08.rar") != std::wstring::npos,
+                L"sin la última parte avisa que falta corto.part08.rar (lo dice el propio RAR) " + Texto(r));
+        {
+            Progreso pr;
+            std::atomic<bool> no{ false };
+            auto lista = Listar(volumenes::Buscar(u + L"\\corto.part01.rar").partes, L"", pr, no);
+            Revisar(lista.faltan.size() == 1 && lista.faltan[0] == L"corto.part08.rar",
+                    L"al listar ya avisa que falta corto.part08.rar (" + lista.mensaje + L")");
+        }
 
-        // Con contraseña: libarchive no los abre y Jícaro lo dice claro
+        // Sin 7z.dll, libarchive no abre los que tienen contraseña y Jícaro dice qué falta
+        pruebas::sinMotor7z = true;
         struct { const wchar_t* uu; const wchar_t* nombre; } cifrados[] = {
             { L"test_read_format_rar5_encrypted_filenames.rar.uu", L"rar5-clave-nombres.rar" },
             { L"test_read_format_rar4_encrypted_filenames.rar.uu", L"rar4-clave-nombres.rar" },
@@ -633,8 +645,8 @@ namespace
             std::wstring archivo = DeLaSuite(s.uu, s.nombre);
             std::wstring destino = Carpeta(std::wstring(L"salida\\") + s.nombre);
             auto rc = ExtraerSimple(archivo, destino);
-            Revisar(rc.estado == jicaro::Estado::CifradoNoSoportado && rc.archivos == 0 && rc.mensaje.find(L"7-Zip") != std::wstring::npos,
-                    std::wstring(s.nombre) + L" avisa que no se puede abrir " + Texto(rc));
+            Revisar(rc.estado == jicaro::Estado::CifradoNoSoportado && rc.archivos == 0 && rc.mensaje.find(L"7z.dll") != std::wstring::npos,
+                    std::wstring(s.nombre) + L" sin 7z.dll avisa que falta 7z.dll " + Texto(rc));
         }
         // Algunos con contraseña y otros sin: salen los que no tienen y avisa de los otros
         struct { const wchar_t* uu; const wchar_t* nombre; } mezcla[] = {
@@ -645,15 +657,16 @@ namespace
         {
             std::wstring archivo = DeLaSuite(s.uu, s.nombre);
             auto rc = ExtraerSimple(archivo, Carpeta(std::wstring(L"salida\\") + s.nombre));
-            Revisar(rc.estado == jicaro::Estado::Bien && rc.archivos > 0 && rc.cifradas > 0 && rc.mensaje.find(L"7-Zip") != std::wstring::npos,
-                    std::wstring(s.nombre) + L": salen los que no tienen contraseña y avisa de los otros " + Texto(rc));
+            Revisar(rc.estado == jicaro::Estado::Bien && rc.archivos > 0 && rc.cifradas > 0 && rc.mensaje.find(L"7z.dll") != std::wstring::npos,
+                    std::wstring(s.nombre) + L" sin 7z.dll: salen los que no tienen contraseña y avisa de los otros " + Texto(rc));
         }
+        pruebas::sinMotor7z = false;
         // Parte con contraseña y parte sin: salen los que no tienen
         {
             std::wstring archivo = DeLaSuite(L"test_read_format_7zip_encryption_partially.7z.uu", L"medio-clave.7z");
             auto rc = ExtraerSimple(archivo, Carpeta(L"salida\\medio-clave"));
-            Revisar(rc.estado == jicaro::Estado::Bien && rc.archivos > 0 && !rc.omitidas.empty(),
-                    L"7z con algunos archivos con contraseña: salen los demás " + Texto(rc));
+            Revisar(rc.estado == jicaro::Estado::Bien && rc.archivos > 0 && rc.sinClave == 1 && rc.omitidas.size() == 1,
+                    L"7z con un archivo con contraseña y nadie a quien pedirla: salen los demás " + Texto(rc));
         }
 
         // Enlaces dentro de un RAR 5
@@ -1113,6 +1126,317 @@ namespace
         }
     }}
 
+namespace
+{
+    // «La persona» da estas contraseñas en orden (y después cancela). Cuenta cuántas veces se le pidió.
+    void Claves(Prueba& p, std::vector<std::wstring> claves)
+    {
+        p.pr.contrasena = [&p, claves](const std::wstring&, bool) -> std::optional<std::wstring> {
+            int i = p.pidioContrasena++;
+            if (i >= (int)claves.size()) return std::nullopt;
+            return claves[(size_t)i];
+        };
+    }
+
+    // Los archivos de la suite de libarchive traen «This is from a.txt», «This is from b.txt»...
+    bool TraeEsto(const std::wstring& carpeta, std::initializer_list<const wchar_t*> nombres)
+    {
+        for (auto* n : nombres)
+        {
+            std::string leido;
+            if (!LeerTodo(carpeta + L"\\" + n, leido) || leido != "This is from " + Utf8(n)) return false;
+        }
+        return true;
+    }
+
+    void PruebasDeClavesRarY7z()
+    {
+        wprintf(L"\nRAR y 7z con contraseña (motor de 7-Zip, 7z.dll)\n");
+        Revisar(motor7z::Disponible(), L"7z.dll está junto a las pruebas y se cargó");
+        if (!motor7z::Disponible()) return;
+
+        // RAR 4 y RAR 5 con dos contraseñas: b.txt con «password» y d.txt con «password2» (a.txt y c.txt sin)
+        struct { const wchar_t* uu; const wchar_t* nombre; } dos[] = {
+            { L"test_read_format_rar4_encrypted.rar.uu", L"rar4-dos-claves.rar" },
+            { L"test_read_format_rar5_encrypted.rar.uu", L"rar5-dos-claves.rar" },
+        };
+        for (auto& s : dos)
+        {
+            std::wstring archivo = DeLaSuite(s.uu, s.nombre);
+            {
+                Prueba p;
+                Claves(p, { L"password", L"password2" });
+                std::wstring d = Carpeta(std::wstring(L"salida\\") + s.nombre);
+                auto r = Extraer(p, archivo, d);
+                Revisar(r.estado == jicaro::Estado::Bien && r.archivos == 4 && r.omitidas.empty() && p.pidioContrasena == 2
+                            && TraeEsto(d, { L"a.txt", L"b.txt", L"c.txt", L"d.txt" }),
+                        std::wstring(s.nombre) + L": pide la contraseña, no sirve para d.txt, pide otra y salen los 4 " + Texto(r));
+            }
+            {
+                // Solo la primera (como con --contrasena-stdin): d.txt queda como «la contraseña no sirvió»
+                Prueba p;
+                p.op.contrasena = L"password";
+                std::wstring d = Carpeta(std::wstring(L"salida\\una-") + s.nombre);
+                auto r = Extraer(p, archivo, d);
+                Revisar(r.estado == jicaro::Estado::Bien && r.archivos == 3 && r.clavesMalas == 1 && Omitio(r, L"d.txt")
+                            && !ExisteArchivo(d + L"\\d.txt") && TraeEsto(d, { L"a.txt", L"b.txt", L"c.txt" }),
+                        std::wstring(s.nombre) + L" con una sola contraseña: salen 3 y d.txt no (sin restos) " + Texto(r));
+            }
+            {
+                // Sin contraseña y sin a quién pedirla: salen los que no tienen
+                std::wstring d = Carpeta(std::wstring(L"salida\\sin-") + s.nombre);
+                auto r = ExtraerSimple(archivo, d);
+                Revisar(r.estado == jicaro::Estado::Bien && r.archivos == 2 && r.sinClave == 2 && TraeEsto(d, { L"a.txt", L"c.txt" }),
+                        std::wstring(s.nombre) + L" sin contraseña: salen a.txt y c.txt " + Texto(r));
+            }
+        }
+
+        // Todo con «password»: sólidos y con los nombres (la lista) cifrados
+        struct { const wchar_t* uu; const wchar_t* nombre; bool lista; } todos[] = {
+            { L"test_read_format_rar4_solid_encrypted.rar.uu", L"rar4-solido-clave.rar", false },
+            { L"test_read_format_rar4_encrypted_filenames.rar.uu", L"rar4-clave-lista.rar", true },
+            { L"test_read_format_rar4_solid_encrypted_filenames.rar.uu", L"rar4-solido-clave-lista.rar", true },
+            { L"test_read_format_rar5_solid_encrypted.rar.uu", L"rar5-solido-clave.rar", false },
+            { L"test_read_format_rar5_encrypted_filenames.rar.uu", L"rar5-clave-lista.rar", true },
+            { L"test_read_format_rar5_solid_encrypted_filenames.rar.uu", L"rar5-solido-clave-lista.rar", true },
+        };
+        for (auto& s : todos)
+        {
+            std::wstring archivo = DeLaSuite(s.uu, s.nombre);
+            {
+                Prueba p;
+                Claves(p, { L"mala", L"password" });
+                std::wstring d = Carpeta(std::wstring(L"salida\\") + s.nombre);
+                auto r = Extraer(p, archivo, d);
+                Revisar(r.estado == jicaro::Estado::Bien && r.archivos == 4 && r.omitidas.empty() && p.pidioContrasena == 2
+                            && TraeEsto(d, { L"a.txt", L"b.txt", L"c.txt", L"d.txt" }),
+                        std::wstring(s.nombre) + L": con una mala avisa y pide otra; con la buena salen los 4 " + Texto(r));
+            }
+            {
+                Prueba p;
+                p.op.contrasena = L"mala";   // y nadie a quien preguntar otra
+                std::wstring d = Carpeta(std::wstring(L"salida\\mala-") + s.nombre);
+                auto r = Extraer(p, archivo, d);
+                Revisar(r.estado == jicaro::Estado::ContrasenaIncorrecta && r.archivos == 0 && ContarArchivos(d) == 0,
+                        std::wstring(s.nombre) + L": solo una mala = «contraseña incorrecta», sin restos " + Texto(r));
+            }
+            {
+                Prueba p;
+                p.pr.contrasena = [&p](const std::wstring&, bool) -> std::optional<std::wstring> {
+                    p.pidioContrasena++;
+                    return std::nullopt;   // la persona cancela
+                };
+                auto r = Extraer(p, archivo, Carpeta(std::wstring(L"salida\\cancela-") + s.nombre));
+                Revisar(r.estado == jicaro::Estado::SinContrasena && r.archivos == 0 && p.pidioContrasena == 1,
+                        std::wstring(s.nombre) + L": si no se da = «hace falta la contraseña» " + Texto(r));
+            }
+            if (s.lista)
+            {
+                Progreso pr;
+                std::atomic<bool> no{ false };
+                auto sin = Listar({ archivo }, L"", pr, no);
+                Prueba p;
+                Claves(p, { L"mala", L"password" });
+                auto con = Listar({ archivo }, L"", pr, no, &p.pr);
+                auto previa = Listar({ archivo }, L"", pr, no, nullptr, std::wstring(L"password"));
+                Revisar(sin.estado == jicaro::Estado::SinContrasena && con.estado == jicaro::Estado::Bien && con.entradas.size() == 4
+                            && con.clave == L"password" && p.pidioContrasena == 2 && previa.estado == jicaro::Estado::Bien
+                            && previa.entradas.size() == 4,
+                        std::wstring(s.nombre) + L": la lista se ve solo con la contraseña (la mala no, la buena sí)");
+            }
+        }
+
+        // Los de antes de libarchive: «12345678»
+        struct { const wchar_t* uu; const wchar_t* nombre; int archivos; } viejos[] = {
+            { L"test_read_format_rar_encryption_data.rar.uu", L"rar-clave-datos.rar", -1 },
+            { L"test_read_format_rar_encryption_header.rar.uu", L"rar-clave-cabecera.rar", -1 },
+            { L"test_read_format_rar_encryption_partially.rar.uu", L"rar-clave-parte.rar", 2 },
+            { L"test_read_format_7zip_encryption.7z.uu", L"7z-clave-datos.7z", -1 },
+            { L"test_read_format_7zip_encryption_header.7z.uu", L"7z-clave-cabecera.7z", -1 },
+            { L"test_read_format_7zip_encryption_partially.7z.uu", L"7z-clave-parte.7z", -1 },
+        };
+        for (auto& s : viejos)
+        {
+            std::wstring archivo = DeLaSuite(s.uu, s.nombre);
+            Prueba p;
+            Claves(p, { L"mala", L"12345678" });
+            std::wstring d = Carpeta(std::wstring(L"salida\\") + s.nombre);
+            auto r = Extraer(p, archivo, d);
+            Revisar(r.estado == jicaro::Estado::Bien && r.archivos > 0 && (s.archivos < 0 || r.archivos == s.archivos)
+                        && r.omitidas.empty() && p.pidioContrasena == 2 && ContarArchivos(d) == r.archivos,
+                    std::wstring(s.nombre) + L": primero una mala, después «12345678» " + Texto(r));
+            Prueba p2;
+            p2.op.contrasena = L"12345678";
+            auto r2 = Extraer(p2, archivo, Carpeta(std::wstring(L"salida\\previa-") + s.nombre));
+            Revisar(r2.estado == jicaro::Estado::Bien && r2.archivos == r.archivos && p2.pidioContrasena == 0,
+                    std::wstring(s.nombre) + L": con la contraseña dada de antemano no pregunta nada " + Texto(r2));
+        }
+
+        // 7z cifrados en trozos .001, .002, .003 (los datos, y también la lista)
+        for (const wchar_t* nombre : { L"7z-clave-datos.7z", L"7z-clave-cabecera.7z" })
+        {
+            std::string todo;
+            LeerTodo(trabajo + L"\\libarchive\\" + nombre, todo);
+            size_t tercio = todo.size() / 3 + 1;
+            std::wstring c = Carpeta(std::wstring(L"trozos-") + nombre);
+            for (int i = 0; i < 3; i++)
+                EscribirTodo(c + L"\\" + nombre + L".00" + std::to_wstring(i + 1), todo.substr(i * tercio, tercio));
+            Prueba p;
+            Claves(p, { L"12345678" });
+            std::wstring d = Carpeta(std::wstring(L"salida\\trozos-") + nombre);
+            auto r = Extraer(p, c + L"\\" + nombre + L".002", d);
+            Revisar(r.estado == jicaro::Estado::Bien && r.archivos > 0 && r.omitidas.empty() && p.pidioContrasena == 1,
+                    std::wstring(nombre) + L" en 3 trozos (.001 a .003), abierto desde el .002 " + Texto(r));
+            Prueba mala;
+            mala.op.contrasena = L"mala";
+            auto rm = Extraer(mala, c + L"\\" + nombre + L".001", Carpeta(std::wstring(L"salida\\trozos-mala-") + nombre));
+            Revisar(rm.estado == jicaro::Estado::ContrasenaIncorrecta && rm.archivos == 0,
+                    std::wstring(nombre) + L" en trozos con una contraseña mala " + Texto(rm));
+        }
+
+        // RAR 4 cifrado en 6 partes (de SharpCompress, contraseña «test»)
+        std::wstring p1 = sharp.empty() ? std::wstring() : sharp + L"\\Rar.EncryptedParts.part01.rar";
+        if (p1.empty() || !ExisteArchivo(p1))
+            Revisar(false, L"faltan los RAR cifrados en partes de SharpCompress (los baja probar.ps1)");
+        else
+        {
+            auto juego = volumenes::Buscar(sharp + L"\\Rar.EncryptedParts.part04.rar");
+            Revisar(juego.partes.size() == 6 && juego.faltan.empty(), L"RAR 4 cifrado: desde la parte 4 encuentra las 6 partes");
+            Prueba p;
+            Claves(p, { L"mala", L"test" });
+            std::wstring d = Carpeta(L"salida\\rar4-cifrado-partes");
+            auto r = Extraer(p, sharp + L"\\Rar.EncryptedParts.part04.rar", d);
+            Revisar(r.estado == jicaro::Estado::Bien && r.archivos > 0 && r.omitidas.empty() && p.pidioContrasena == 2
+                        && ContarArchivos(d) == r.archivos,
+                    L"RAR 4 cifrado en 6 partes: con una mala avisa, con «test» sale todo " + Texto(r));
+            Prueba previa;
+            previa.op.contrasena = L"test";
+            auto r2 = Extraer(previa, p1, Carpeta(L"salida\\rar4-cifrado-partes-previa"));
+            Revisar(r2.estado == jicaro::Estado::Bien && r2.archivos == r.archivos && previa.pidioContrasena == 0,
+                    L"RAR 4 cifrado en 6 partes con la contraseña dada de antemano " + Texto(r2));
+            Prueba mala;
+            mala.op.contrasena = L"mala";
+            std::wstring dm = Carpeta(L"salida\\rar4-cifrado-partes-mala");
+            auto r3 = Extraer(mala, p1, dm);
+            Revisar(r3.estado == jicaro::Estado::ContrasenaIncorrecta && r3.archivos == 0 && ContarArchivos(dm) == 0,
+                    L"RAR 4 cifrado en 6 partes con una mala: «contraseña incorrecta», sin restos " + Texto(r3));
+            // Sin la parte 6
+            std::wstring cinco = Carpeta(L"cifrado-sin-ultima");
+            for (int i = 1; i <= 5; i++)
+                CopyFileW((sharp + L"\\Rar.EncryptedParts.part0" + std::to_wstring(i) + L".rar").c_str(),
+                          (cinco + L"\\cortado.part0" + std::to_wstring(i) + L".rar").c_str(), FALSE);
+            Prueba sin;
+            sin.op.contrasena = L"test";
+            auto r4 = Extraer(sin, cinco + L"\\cortado.part01.rar", Carpeta(L"salida\\cifrado-sin-ultima"));
+            Revisar(r4.estado == jicaro::Estado::FaltaParte && r4.mensaje.find(L"cortado.part06.rar") != std::wstring::npos,
+                    L"RAR 4 cifrado sin la última parte: avisa que falta cortado.part06.rar " + Texto(r4));
+        }
+
+        // RAR 5 con un enlace duro: sale como copia (sin enlaces en el disco)
+        {
+            std::wstring archivo = DeLaSuite(L"test_read_format_rar5_hardlink.rar.uu", L"rar5-duro.rar");
+            std::wstring d = Carpeta(L"salida\\rar5-duro");
+            auto r = ExtraerSimple(archivo, d);
+            bool sinEnlaces = true;
+            WIN32_FIND_DATAW fd;
+            HANDLE b = FindFirstFileW((d + L"\\*").c_str(), &fd);
+            if (b != INVALID_HANDLE_VALUE)
+            {
+                do
+                {
+                    if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+                    HANDLE h = CreateFileW((d + L"\\" + fd.cFileName).c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ, nullptr,
+                                           OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+                    BY_HANDLE_FILE_INFORMATION info{};
+                    if (h == INVALID_HANDLE_VALUE || !GetFileInformationByHandle(h, &info) || info.nNumberOfLinks != 1
+                        || (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT))
+                        sinEnlaces = false;
+                    if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
+                } while (FindNextFileW(b, &fd));
+                FindClose(b);
+            }
+            Revisar(r.estado == jicaro::Estado::Bien && r.archivos == 2 && r.omitidas.empty() && sinEnlaces,
+                    L"RAR 5 con enlace duro: sale como copia (un archivo común), sin enlaces " + Texto(r));
+        }
+
+        // 7z hechos a propósito con trampas (libarchive arma 7z): rutas con «..», absolutas y un enlace
+        {
+            std::wstring c = Carpeta(L"malos");
+            std::wstring raiz = trabajo.substr(2) + L"\\fuera-raiz-7z.txt";
+            for (auto& ch : raiz)
+                if (ch == L'\\') ch = L'/';
+            Armar(c + L"\\malo.7z",
+                  { { L"bien.txt", "bien" }, { L"../fuera-7z-1.txt", "x" }, { L"a/../../fuera-7z-2.txt", "x" }, { L"/fuera-7z-abs.txt", "x" },
+                    { L"C:/fuera-7z-abs2.txt", "x" }, { raiz, "x" }, { L"enlace", "", Item::Simbolico, L"../../.." },
+                    { L"x.txt:Zone.Identifier", "[ZoneTransfer]\r\nZoneId=0\r\n" } },
+                  [](archive* a) { archive_write_set_format_7zip(a); });
+            std::wstring d = Carpeta(L"salida\\malo-7z\\destino");
+            auto r = ExtraerSimple(c + L"\\malo.7z", d);
+            DWORD at = GetFileAttributesW((d + L"\\enlace").c_str());
+            Revisar(r.estado == jicaro::Estado::Bien && ExisteArchivo(d + L"\\bien.txt") && Omitio(r, L"enlace")
+                        && (at == INVALID_FILE_ATTRIBUTES || !(at & FILE_ATTRIBUTE_REPARSE_POINT)) && r.rechazados >= 6
+                        && !ExisteArchivo(trabajo + L"\\fuera-raiz-7z.txt") && !ExisteArchivo(L"C:\\fuera-7z-abs.txt")
+                        && !ExisteArchivo(L"C:\\fuera-7z-abs2.txt")
+                        && (ExisteArchivo(d + L"\\x.txt_Zone.Identifier") || Omitio(r, L"x.txt:Zone.Identifier"))
+                        && !ExisteArchivo(d + L"\\x.txt:Zone.Identifier"),
+                    L"7z con «..», rutas absolutas y un enlace: nada sale de la carpeta ni se crea un enlace " + Texto(r));
+            Revisar(!HayAlgoFuera(trabajo), L"ningún «fuera-*» del 7z quedó en la carpeta de trabajo");
+        }
+
+        // Bomba chica en 7z: anuncia 600 MB y se pregunta antes de crear nada
+        {
+            std::wstring c = Carpeta(L"malos");
+            std::wstring bomba = c + L"\\bomba-chica.7z";
+            Armar(bomba, { { L"ceros.bin", "", Item::Archivo, L"", 600LL << 20 } }, [](archive* a) {
+                archive_write_set_format_7zip(a);
+                archive_write_set_format_option(a, "7zip", "compression", "deflate");
+            });
+            Prueba p;
+            p.pr.bomba = [&p](const std::wstring&) {
+                p.pidioBomba++;
+                return false;
+            };
+            std::wstring d = Carpeta(L"salida\\bomba-7z");
+            auto r = Extraer(p, bomba, d);
+            Revisar(r.estado == jicaro::Estado::Detenido && p.pidioBomba == 1 && !ExisteArchivo(d + L"\\ceros.bin"),
+                    L"7z que anuncia 600 MB (pesa " + TextoTamano(TamanoArchivo(bomba)) + L"): pregunta antes y se detiene " + Texto(r));
+            Prueba q;
+            q.pr.bomba = [](const std::wstring&) { return true; };
+            std::wstring dc = Carpeta(L"salida\\bomba-7z-cancelada");
+            std::thread t([&q]() {
+                std::this_thread::sleep_for(std::chrono::milliseconds(300));
+                q.cancelar = true;
+            });
+            auto rc = Extraer(q, bomba, dc);
+            t.join();
+            Revisar(rc.estado == jicaro::Estado::Cancelado && !ExisteArchivo(dc + L"\\ceros.bin"),
+                    L"cancelar en medio de un 7z quita el archivo a medias " + Texto(rc));
+        }
+
+        // La marca de la Web también pasa a lo que sale de un RAR y de un 7z
+        {
+            CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+            std::wstring c = Carpeta(L"marca");
+            struct { std::wstring origen, nombre; } bajados[] = {
+                { trabajo + L"\\libarchive\\rar5-dos-claves.rar", L"bajado.rar" },
+                { trabajo + L"\\propios\\propio.7z", L"bajado.7z" },
+            };
+            for (auto& b : bajados)
+            {
+                std::wstring archivo = c + L"\\" + b.nombre;
+                CopyFileW(b.origen.c_str(), archivo.c_str(), FALSE);
+                EscribirTodo(archivo + L":Zone.Identifier", "[ZoneTransfer]\r\nZoneId=3\r\nHostUrl=https://ejemplo.org/\r\n");
+                Prueba p;
+                Claves(p, { L"password", L"password2" });
+                std::wstring d = Carpeta(L"salida\\marca-" + b.nombre);
+                auto r = Extraer(p, archivo, d);
+                Revisar(r.estado == jicaro::Estado::Bien && r.zona == 3 && r.archivos > 0 && r.marcados == r.archivos,
+                        b.nombre + L": todo lo que sale queda marcado como bajado de internet " + Texto(r));
+            }
+            CoUninitialize();
+        }
+    }
+}
 int wmain(int argc, wchar_t** argv)
 {
     _setmode(_fileno(stdout), _O_U8TEXT);
@@ -1144,11 +1468,12 @@ int wmain(int argc, wchar_t** argv)
     }
     if (argc < 3)
     {
-        wprintf(L"Uso: prueba-nucleo.exe <carpeta con los .uu de libarchive> <carpeta de trabajo nueva>\n");
+        wprintf(L"Uso: prueba-nucleo.exe <carpeta con los .uu de libarchive> <carpeta de trabajo nueva> [<carpeta de SharpCompress>]\n");
         return 100;
     }
     suite = RutaCompleta(argv[1]);
     trabajo = RutaCompleta(argv[2]);
+    if (argc > 3) sharp = RutaCompleta(argv[3]);
     if (ExisteCarpeta(trabajo))
     {
         wprintf(L"La carpeta de trabajo ya existe: usa una nueva.\n");
@@ -1160,6 +1485,7 @@ int wmain(int argc, wchar_t** argv)
     PruebasPropias();
     PruebasDeContrasena();
     PruebasRarY7z();
+    PruebasDeClavesRarY7z();
     PruebasMalas();
     PruebasDeBomba();
     PruebasSiExiste();

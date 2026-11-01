@@ -1,11 +1,11 @@
-# Compila Jícaro desde este código en cada cambio y corre las pruebas sin ventana. Con una etiqueta v* (por ejemplo
-# v0.1.0) además publica la versión en Releases con el .zip y su huella SHA-256: así los .zip salen de GitHub, no de
-# una PC.
+# Compila Jícaro desde este código en cada cambio (en cualquier rama) y corre las pruebas sin ventana. Con una
+# etiqueta v* (por ejemplo v0.2.0) además publica la versión en Releases con el .zip, su huella SHA-256 y el código
+# fuente de la 7-Zip que va adentro (7z.dll es LGPL): así los .zip salen de GitHub, no de una PC.
 name: Compilar
 
 on:
   push:
-    branches: [main]
+    branches: ['**']
     tags: ['v*']
   pull_request:
   workflow_dispatch:
@@ -61,7 +61,8 @@ jobs:
         shell: pwsh
         run: ./compilar.ps1 -Publicacion
 
-      # Rutas peligrosas, partes, contraseñas, enlaces, bomba chica y la marca de la Web, con archivos de verdad
+      # Rutas peligrosas, partes, contraseñas (también RAR y 7z con 7z.dll), enlaces, bomba chica y la marca de la Web,
+      # con archivos de verdad
       - name: Pruebas sin ventana
         shell: pwsh
         run: ./pruebas/probar.ps1
@@ -89,5 +90,9 @@ jobs:
           2. Si Windows dice «Windows protegió su PC», pulsa «Más información» y luego «Ejecutar de todas formas»
              (el programa es nuevo y aún no tiene firma digital).
           3. La huella SHA-256 está en el archivo ``.sha256``. Este .zip lo armó GitHub a partir de este mismo código.
+
+          Trae 7z.dll de 7-Zip (de Igor Pavlov, licencia GNU LGPL) para abrir los RAR y los 7z. Su código fuente, de la
+          misma versión, va aquí abajo (``7z*-src.7z``) y en https://www.7-zip.org.
           "@
-          gh release create "${{ github.ref_name }}" (Get-ChildItem publicar -Filter 'Jicaro-*').FullName --title "Jícaro $version" --notes $notas
+          $archivos = @((Get-ChildItem publicar -Filter 'Jicaro-*').FullName) + @((Get-ChildItem build\7zip -Filter '7z*-src.7z').FullName)
+          gh release create "${{ github.ref_name }}" $archivos --title "Jícaro $version" --notes $notas

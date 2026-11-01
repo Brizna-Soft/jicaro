@@ -61,9 +61,16 @@ std::optional<std::wstring> dialogos::PedirContrasena(wxWindow* padre, const std
     wxDialog d(padre, wxID_ANY, L"Contraseña");
     auto* caja = new wxBoxSizer(wxVERTICAL);
     const int margen = d.FromDIP(14);
-    wxString texto = otraVez
-        ? wxString::Format(L"La contraseña no sirvió para «%s». Prueba otra:", jicaro::NombreDe(entrada))
-        : wxString::Format(L"«%s» está protegido con contraseña. Escríbela para extraerlo:", jicaro::NombreDe(archivo));
+    // «entrada» vacía: la contraseña es para abrir el archivo entero (también la lista de lo que trae)
+    wxString texto;
+    if (otraVez)
+        texto = entrada.empty() ? wxString(L"La contraseña no sirvió. Prueba otra:")
+                                : wxString::Format(L"La contraseña no sirvió para «%s». Prueba otra:", jicaro::NombreDe(entrada));
+    else
+        texto = entrada.empty()
+            ? wxString::Format(L"«%s» está protegido con contraseña, también la lista de lo que trae. Escríbela para abrirlo:",
+                               jicaro::NombreDe(archivo))
+            : wxString::Format(L"«%s» está protegido con contraseña. Escríbela para extraerlo:", jicaro::NombreDe(archivo));
     caja->Add(Texto(&d, texto, 380), 0, wxALL, margen);
     auto* oculta = new wxTextCtrl(&d, wxID_ANY, L"", wxDefaultPosition, wxSize(d.FromDIP(380), -1), wxTE_PASSWORD | wxTE_PROCESS_ENTER);
     auto* visible = new wxTextCtrl(&d, wxID_ANY, L"", wxDefaultPosition, wxSize(d.FromDIP(380), -1), wxTE_PROCESS_ENTER);
@@ -265,7 +272,7 @@ wxString dialogos::TextoResumen(const jicaro::Resumen& r, const std::wstring& de
     wxString t;
     if (r.estado == jicaro::Estado::Bien)
     {
-        if (r.cifradas > 0) t = r.mensaje;
+        if (r.cifradas > 0 || r.clavesMalas > 0 || r.sinClave > 0) t = r.mensaje;
         else if (r.archivos == 0 && r.saltados > 0)
             t = wxString::Format(L"No se extrajo nada nuevo: los %s archivos ya estaban en «%s».", TextoNumero(r.saltados), destino);
         else if (r.archivos == 1) t = wxString::Format(L"Se extrajo 1 archivo en «%s».", destino);
@@ -290,13 +297,20 @@ wxString dialogos::TextoResumen(const jicaro::Resumen& r, const std::wstring& de
     if (r.quitoAMedias) t += L"\nSe quitó el archivo que quedó a medias.";
     if (!r.aMedias.empty())
         t += L"\nNo se pudo quitar un archivo que quedó a medias: «" + wxString(r.aMedias) + L"». Está incompleto; puedes borrarlo.";
-    if (r.rechazados > 0 && r.fallidos > 0)
-        t += wxString::Format(L"\n\nSe saltaron %s por seguridad y %s no se pudieron extraer:", TextoNumero(r.rechazados),
-                              TextoNumero(r.fallidos));
-    else if (r.rechazados > 0)
-        t += wxString::Format(L"\n\nSe saltaron %s por seguridad:", TextoNumero(r.rechazados));
-    else if (r.fallidos > 0)
-        t += wxString::Format(L"\n\n%s no se pudieron extraer:", TextoNumero(r.fallidos));
+    // Encabezado de la lista de lo que no salió: «Se saltaron 2 por seguridad, 1 no se pudo extraer y 3 no salieron...»
+    std::vector<wxString> motivos;
+    if (r.rechazados > 0) motivos.push_back(wxString::Format(L"se saltaron %s por seguridad", TextoNumero(r.rechazados)));
+    if (r.fallidos > 0) motivos.push_back(wxString::Format(L"%s no se pudieron extraer", TextoNumero(r.fallidos)));
+    if (r.clavesMalas > 0)
+        motivos.push_back(wxString::Format(L"%s no salieron porque la contraseña no sirvió", TextoNumero(r.clavesMalas)));
+    if (r.sinClave > 0) motivos.push_back(wxString::Format(L"%s tienen contraseña y no se dio", TextoNumero(r.sinClave)));
+    if (!motivos.empty())
+    {
+        wxString lista;
+        for (size_t i = 0; i < motivos.size(); i++)
+            lista += (i == 0 ? L"" : (i + 1 == motivos.size() ? L" y " : L", ")) + motivos[i];
+        t += L"\n\n" + lista.Left(1).Upper() + lista.Mid(1) + L":";
+    }
     return t;
 }
 

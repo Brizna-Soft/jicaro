@@ -142,7 +142,15 @@ void Trabajo::Listar(std::vector<std::wstring> partes, std::wstring nombreSuelto
         m_hilo = std::thread([this, partes = std::move(partes), nombreSuelto = std::move(nombreSuelto), resultado]() {
             try
             {
-                *resultado = jicaro::Listar(partes, nombreSuelto, m_progreso, m_cancelar);
+                // Si la lista misma tiene contraseña (RAR o 7z con las cabeceras cifradas), se pregunta aquí
+                std::wstring archivo = partes.empty() ? std::wstring() : partes.front();
+                wxWindow* ventana = m_ventana;
+                jicaro::Preguntas pr;
+                pr.contrasena = [this, archivo, ventana](const std::wstring& entrada, bool otraVez) {
+                    return Preguntar<std::optional<std::wstring>>(
+                        [=]() { return dialogos::PedirContrasena(ventana, archivo, entrada, otraVez); }, std::nullopt);
+                };
+                *resultado = jicaro::Listar(partes, nombreSuelto, m_progreso, m_cancelar, &pr);
             }
             catch (...)
             {
@@ -165,7 +173,7 @@ void Trabajo::Listar(std::vector<std::wstring> partes, std::wstring nombreSuelto
     }
 }
 
-void Trabajo::Extraer(jicaro::Opciones opciones, std::function<void(jicaro::Resumen)> alTerminar)
+void Trabajo::Extraer(jicaro::Opciones opciones, std::function<void(jicaro::Resumen)> alTerminar, bool preguntarClave)
 {
     Esperar();
     m_cancelar = false;
@@ -198,16 +206,17 @@ void Trabajo::Extraer(jicaro::Opciones opciones, std::function<void(jicaro::Resu
     m_aviso = aviso;
     try
     {
-        m_hilo = std::thread([this, op, resultado]() {
+        m_hilo = std::thread([this, op, resultado, preguntarClave]() {
             try
             {
                 std::wstring archivo = op->partes.empty() ? L"" : op->partes.front();
                 wxWindow* ventana = m_ventana;
                 jicaro::Preguntas pr;
-                pr.contrasena = [this, archivo, ventana](const std::wstring& entrada, bool otraVez) {
-                    return Preguntar<std::optional<std::wstring>>(
-                        [=]() { return dialogos::PedirContrasena(ventana, archivo, entrada, otraVez); }, std::nullopt);
-                };
+                if (preguntarClave)
+                    pr.contrasena = [this, archivo, ventana](const std::wstring& entrada, bool otraVez) {
+                        return Preguntar<std::optional<std::wstring>>(
+                            [=]() { return dialogos::PedirContrasena(ventana, archivo, entrada, otraVez); }, std::nullopt);
+                    };
                 pr.existe = [this, ventana](const std::wstring& ruta, bool& paraTodos) {
                     auto r = Preguntar<std::pair<jicaro::Decision, bool>>(
                         [=]() {

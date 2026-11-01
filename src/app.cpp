@@ -4,9 +4,12 @@
 //   Jicaro.exe                          ventana vacía (se le puede arrastrar un archivo)
 //   Jicaro.exe "<archivo>"              ventana con ese archivo abierto
 //   Jicaro.exe --extraer "<archivo>" [--destino "<carpeta>" | --aqui] [--si-existe preguntar|reemplazar|saltar|renombrar]
+//              [--contrasena-stdin]
 //                                       extrae con una ventana chica de progreso (la usan el clic derecho y Atarraya).
 //                                       Sin --destino ni --aqui, extrae en una carpeta nueva con el nombre del archivo,
-//                                       al lado de él. Códigos de salida: ver progreso.hpp.
+//                                       al lado de él. Con --contrasena-stdin, la contraseña llega por la entrada estándar
+//                                       (una línea en UTF-8) y no se pregunta en una ventana. Nunca va en los
+//                                       argumentos. Códigos de salida: ver progreso.hpp.
 //   Jicaro.exe --registrar-menu         agrega «Extraer aquí» al clic derecho (lo mismo que la casilla de Ajustes)
 //   Jicaro.exe --quitar-menu            lo quita
 
@@ -38,6 +41,57 @@ namespace
         std::vector<wchar_t> buf(32768);
         DWORD n = GetModuleFileNameW(nullptr, buf.data(), (DWORD)buf.size());
         return std::wstring(buf.data(), n);
+    }
+
+    enum class Lectura { Bien, Vacia, NoEsUtf8 };
+
+    // La contraseña de --contrasena-stdin: la primera línea de la entrada estándar, en UTF-8 (sin el salto de línea).
+    // Espera hasta 15 segundos a que llegue. No se escribe en ningún lado y se borra de la memoria al terminar.
+    Lectura LeerClaveDeEntrada(std::wstring& clave)
+    {
+        clave.clear();
+        HANDLE h = GetStdHandle(STD_INPUT_HANDLE);
+        if (!h || h == INVALID_HANDLE_VALUE) return Lectura::Vacia;
+        DWORD tipo = GetFileType(h);
+        if (tipo != FILE_TYPE_PIPE && tipo != FILE_TYPE_DISK) return Lectura::Vacia;   // una consola: no se espera nada
+        std::string bytes;
+        bytes.reserve(256);
+        const ULONGLONG inicio = GetTickCount64();
+        while (bytes.size() < 4096)
+        {
+            if (tipo == FILE_TYPE_PIPE)
+            {
+                DWORD hay = 0;
+                if (!PeekNamedPipe(h, nullptr, 0, nullptr, &hay, nullptr)) break;   // se cerró sin más datos
+                if (hay == 0)
+                {
+                    if (GetTickCount64() - inicio > 15000) break;
+                    Sleep(10);
+                    continue;
+                }
+            }
+            char c = 0;
+            DWORD n = 0;
+            if (!ReadFile(h, &c, 1, &n, nullptr) || n == 0) break;
+            if (c == '\n') break;
+            bytes.push_back(c);
+        }
+        if (!bytes.empty() && bytes.back() == '\r') bytes.pop_back();
+        size_t desde = bytes.rfind("\xEF\xBB\xBF", 0) == 0 ? 3 : 0;   // sin la marca BOM, si vino
+        Lectura r = Lectura::Vacia;
+        if (bytes.size() > desde)
+        {
+            int n = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, bytes.data() + desde, (int)(bytes.size() - desde), nullptr, 0);
+            if (n <= 0) r = Lectura::NoEsUtf8;
+            else
+            {
+                clave.resize((size_t)n);
+                MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, bytes.data() + desde, (int)(bytes.size() - desde), clave.data(), n);
+                r = Lectura::Bien;
+            }
+        }
+        if (!bytes.empty()) SecureZeroMemory(bytes.data(), bytes.size());
+        return r;
     }
 }
 
@@ -81,7 +135,7 @@ bool Aplicacion::OnInit()
     setlocale(LC_CTYPE, "");
 
     std::wstring archivo, destino;
-    bool extraer = false, aqui = false, registrar = false, quitar = false;
+    bool extraer = false, aqui = false, registrar = false, quitar = false, claveStdin = false, claveEnArgumentos = false;
     std::optional<jicaro::SiExiste> siExiste;
     for (int i = 1; i < argc; i++)
     {
@@ -101,6 +155,10 @@ bool Aplicacion::OnInit()
             else if (v == L"renombrar") siExiste = jicaro::SiExiste::Renombrar;
             else siExiste = jicaro::SiExiste::Preguntar;
         }
+        else if (a == L"--contrasena-stdin") claveStdin = true;
+        else if (jicaro::EmpiezaSinMayusculas(a, L"--contrasena") || jicaro::EmpiezaSinMayusculas(a, L"--password")
+                 || jicaro::EmpiezaSinMayusculas(a, L"--clave"))
+            claveEnArgumentos = true;   // nunca se acepta una contraseña en los argumentos (se verían en la lista de procesos)
         else if (a == L"--registrar-menu") registrar = true;
         else if (a == L"--quitar-menu") quitar = true;
         else if (!a.empty() && a[0] != L'-' && archivo.empty()) archivo = a;
@@ -134,9 +192,30 @@ bool Aplicacion::OnInit()
     if (extraer)
     {
         jicaro::Registrar(std::string("Jicaro ") + APP_VERSION_TEXTO + " --extraer" + (aqui ? " --aqui" : "") +
-                          (destino.empty() ? "" : " --destino"));
+                          (destino.empty() ? "" : " --destino") + (claveStdin ? " --contrasena-stdin" : ""));
         m_conCodigo = true;
         codigoSalida = SALIDA_ERROR;
+        if (claveEnArgumentos)
+        {
+            ayuda::Aviso(L"La contraseña no se puede escribir en la línea de comandos (otros programas la verían). Usa "
+                         L"--contrasena-stdin y mándala por la entrada estándar.",
+                         L"Jícaro", wxOK | wxICON_WARNING);
+            Salir(SALIDA_ERROR);
+            return true;
+        }
+        std::optional<std::wstring> clave;
+        if (claveStdin)
+        {
+            std::wstring leida;
+            Lectura l = LeerClaveDeEntrada(leida);
+            if (l == Lectura::NoEsUtf8)
+            {
+                ayuda::Aviso(L"La contraseña que llegó por la entrada estándar no está en UTF-8.", L"Jícaro", wxOK | wxICON_WARNING);
+                Salir(SALIDA_ERROR);
+                return true;
+            }
+            if (l == Lectura::Bien) clave = std::move(leida);
+        }
         if (archivo.empty() || !jicaro::ExisteArchivo(archivo))
         {
             ayuda::Aviso(L"No encuentro el archivo que hay que extraer. ¿Se movió o se borró?", L"Jícaro", wxOK | wxICON_WARNING);
@@ -145,7 +224,7 @@ bool Aplicacion::OnInit()
         }
         auto modo = !destino.empty() ? VentanaProgreso::Modo::Destino
                                      : (aqui ? VentanaProgreso::Modo::Aqui : VentanaProgreso::Modo::Carpeta);
-        auto* v = new VentanaProgreso(archivo, modo, destino, siExiste.value_or(m_ajustes.siExiste));
+        auto* v = new VentanaProgreso(archivo, modo, destino, siExiste.value_or(m_ajustes.siExiste), std::move(clave), claveStdin);
         if (!v->Empezar())
         {
             v->Destroy();

@@ -28,9 +28,11 @@ public:
     bool Cancelando() const { return m_cancelar; }
     jicaro::Progreso& Progreso() { return m_progreso; }
 
-    // «alTerminar» corre en el hilo de la ventana, una sola vez y solo si este objeto sigue vivo
+    // «alTerminar» corre en el hilo de la ventana, una sola vez y solo si este objeto sigue vivo. Si hace falta una
+    // contraseña, se pregunta en una ventana (en Extraer, solo con «preguntarClave»: la línea de comandos con
+    // --contrasena-stdin no muestra preguntas de contraseña).
     void Listar(std::vector<std::wstring> partes, std::wstring nombreSuelto, std::function<void(jicaro::Contenido)> alTerminar);
-    void Extraer(jicaro::Opciones opciones, std::function<void(jicaro::Resumen)> alTerminar);
+    void Extraer(jicaro::Opciones opciones, std::function<void(jicaro::Resumen)> alTerminar, bool preguntarClave = true);
 
     // Si el aviso de «terminé» no pudo llegar a la ventana (por ejemplo, sin memoria), queda guardado: el reloj de la
     // ventana lo recoge con esto, para que nunca se quede trabada en «extrayendo»

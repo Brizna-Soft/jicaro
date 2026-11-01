@@ -25,8 +25,9 @@
 
 namespace
 {
-    const wchar_t* Descripcion = L"Jícaro abre y extrae archivos comprimidos: ZIP (también con contraseña), RAR, RAR 5 y "
-                                 L"RAR en varias partes, 7z, TAR, GZ, BZ2, XZ, ZST, ISO y CAB.";
+    const wchar_t* Descripcion = L"Jícaro abre y extrae archivos comprimidos: ZIP, RAR, RAR 5 y 7z (también con contraseña y "
+                                 L"en varias partes), TAR, GZ, BZ2, XZ, ZST, ISO y CAB. Para los RAR y los 7z usa el motor "
+                                 L"de 7-Zip (7z.dll).";
 
     // «12/10/2026 14:05» a partir de segundos desde 1970 (hora local)
     wxString TextoFecha(int64_t segundos)
@@ -56,8 +57,6 @@ namespace
     private:
         VentanaPrincipal* m_v;
     };
-
-    bool EsZip(const jicaro::Contenido& c) { return c.formato.rfind(L"ZIP", 0) == 0; }
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -89,6 +88,7 @@ wxString ListaContenido::OnGetItemText(long fila, long columna) const
     case 2: return TextoFecha(e.fecha);
     case 3:
         if (e.enlace) return L"Enlace (no se extrae)";
+        if (e.especial) return L"No se extrae";
         if (e.carpeta) return L"Carpeta";
         if (e.cifrada) return L"Con contraseña";
         return L"";
@@ -288,6 +288,7 @@ void VentanaPrincipal::AbrirArchivo(const std::wstring& ruta)
     }
     m_juego = jicaro::volumenes::Buscar(ruta);
     m_contenido = jicaro::Contenido();
+    BorrarClave();
     m_lista->Poner(nullptr);
     m_hayArchivo = true;
     m_lista->Show();
@@ -320,9 +321,32 @@ void VentanaPrincipal::AbrirArchivo(const std::wstring& ruta)
     ActualizarBotones();
 }
 
+void VentanaPrincipal::BorrarClave()
+{
+    if (m_clave && !m_clave->empty()) SecureZeroMemory(m_clave->data(), m_clave->size() * sizeof(wchar_t));
+    m_clave.reset();
+}
+
 void VentanaPrincipal::AlTerminarLista(jicaro::Contenido c)
 {
     m_listando = false;
+    // La contraseña que abrió la lista se guarda para extraer sin preguntarla otra vez
+    if (!c.clave.empty())
+    {
+        BorrarClave();
+        m_clave = c.clave;
+        SecureZeroMemory(c.clave.data(), c.clave.size() * sizeof(wchar_t));
+        c.clave.clear();
+    }
+    // Una parte que según el archivo sigue y no está (por ejemplo, la última, que por los nombres no se nota)
+    bool faltaOtra = false;
+    for (auto& f : c.faltan)
+        if (std::find(m_juego.faltan.begin(), m_juego.faltan.end(), f) == m_juego.faltan.end())
+        {
+            m_juego.faltan.push_back(f);
+            faltaOtra = true;
+        }
+    if (faltaOtra && !c.mensaje.empty()) PonerAviso(c.mensaje, true);
     m_contenido = std::move(c);
     m_lista->Poner(&m_contenido.entradas);
 
@@ -341,19 +365,19 @@ void VentanaPrincipal::AlTerminarLista(jicaro::Contenido c)
     bool seguir = (bool)m_despuesDeListar;
     if (!m_juego.faltan.empty())
     {
-        // el aviso de las partes que faltan ya está puesto
+        // el aviso de las partes que faltan ya está puesto (al abrir, o arriba si lo dijo el archivo)
     }
     else if (seguir)
         PonerAviso(L"", false);
     else if (m_contenido.estado != jicaro::Estado::Bien && !m_contenido.mensaje.empty())
         PonerAviso(m_contenido.mensaje, true);
-    else if (m_contenido.cifradas > 0 && !EsZip(m_contenido))
-        PonerAviso(wxString::Format(L"%s archivos tienen una contraseña de un tipo que Jícaro todavía no puede abrir. Para esos "
-                                    L"usa otro programa, como 7-Zip o WinRAR; los demás sí se pueden extraer.",
+    else if (m_contenido.cifradas > 0 && !m_contenido.cifradoSoportado)
+        PonerAviso(wxString::Format(L"%s archivos tienen contraseña y Jícaro no puede abrirlos: falta 7z.dll junto a "
+                                    L"Jicaro.exe. Vuelve a bajar Jícaro y descomprímelo entero; los demás sí se pueden extraer.",
                                     jicaro::TextoNumero(m_contenido.cifradas)),
                    true);
-    else if (m_contenido.cifradas > 0)
-        PonerAviso(L"Este ZIP tiene contraseña: Jícaro te la va a pedir al extraer.", false);
+    else if (m_contenido.cifradas > 0 && !m_clave)
+        PonerAviso(L"Este archivo tiene contraseña: Jícaro te la va a pedir al extraer.", false);
     else if (!m_contenido.mensaje.empty())
         PonerAviso(m_contenido.mensaje, false);
 
@@ -405,16 +429,16 @@ void VentanaPrincipal::Extraer(bool soloElegido)
         }
     }
 
-    // RAR o 7z con contraseña: libarchive no los abre
-    if (m_contenido.completo && m_contenido.cifradas > 0 && !EsZip(m_contenido))
+    // Con contraseña y sin 7z.dll: no se pueden abrir
+    if (m_contenido.completo && m_contenido.cifradas > 0 && !m_contenido.cifradoSoportado)
     {
         int64_t archivos = 0;
         for (auto& e : m_contenido.entradas)
             if (!e.carpeta && !e.enlace) archivos++;
         if (m_contenido.cifradas >= archivos)
         {
-            ayuda::Aviso(L"Todos los archivos de aquí tienen una contraseña de un tipo que Jícaro todavía no puede abrir. "
-                         L"Para este archivo usa otro programa, como 7-Zip o WinRAR.",
+            ayuda::Aviso(L"Todos los archivos de aquí tienen contraseña y Jícaro no puede abrirlos: falta 7z.dll junto a "
+                         L"Jicaro.exe. Vuelve a bajar Jícaro y descomprímelo entero.",
                          L"Con contraseña", wxOK | wxICON_WARNING, this);
             return;
         }
@@ -458,9 +482,11 @@ void VentanaPrincipal::Extraer(bool soloElegido)
     op.elegidas = elegidas;
     op.nombreSuelto = m_juego.nombreSuelto;
     op.totalEsperado = m_contenido.completo ? total : 0;
+    op.contrasena = m_clave;
     m_extrayendo = true;
     Ocupar(L"Extrayendo...");
     m_trabajo.Extraer(op, [this, carpeta, abrir](jicaro::Resumen r) { AlTerminarExtraccion(r, carpeta, abrir); });
+    if (op.contrasena && !op.contrasena->empty()) SecureZeroMemory(op.contrasena->data(), op.contrasena->size() * sizeof(wchar_t));
 }
 
 void VentanaPrincipal::AlTerminarExtraccion(const jicaro::Resumen& r, const std::wstring& destino, bool abrir)
@@ -566,6 +592,7 @@ void VentanaPrincipal::AlCerrar(wxCloseEvent& e)
         }
     }
     GuardarPosicion();
+    BorrarClave();
     m_reloj.Stop();
     Destroy();
 }

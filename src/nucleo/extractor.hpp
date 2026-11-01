@@ -1,7 +1,7 @@
 #pragma once
 
-// Leer y extraer archivos comprimidos con libarchive (BSD). Sin wxWidgets: lo usan la ventana, la línea de comandos y
-// las pruebas. Las preguntas a la persona (contraseña, archivo que ya existe, posible bomba) llegan por funciones que
+// Leer y extraer archivos comprimidos: los RAR y los 7z con 7z.dll de 7-Zip (ver motor7z.hpp), y lo demás con libarchive
+// (BSD). Sin wxWidgets: lo usan la ventana, la línea de comandos y las pruebas. Las preguntas a la persona (contraseña, archivo que ya existe, posible bomba) llegan por funciones que
 // el hilo de trabajo llama y que esperan la respuesta.
 
 #include <atomic>
@@ -21,6 +21,7 @@ namespace jicaro
         int64_t fecha = 0;      // segundos desde 1970; 0 si no se sabe
         bool carpeta = false;
         bool enlace = false;    // enlace simbólico o duro: Jícaro no los crea
+        bool especial = false;  // flujo alterno de NTFS, dispositivo o marca de borrado: no se extrae
         bool cifrada = false;
     };
 
@@ -30,8 +31,9 @@ namespace jicaro
         Cancelado,
         Error,
         FaltaParte,
-        CifradoNoSoportado,     // RAR o 7z con contraseña, o ZIP con «cifrado fuerte»: libarchive no los abre
-        SinContrasena,          // pedía contraseña y no se dio una que sirviera
+        CifradoNoSoportado,     // un cifrado que Jícaro no abre (ZIP con «cifrado fuerte», o RAR y 7z sin 7z.dll)
+        SinContrasena,          // pedía contraseña y no se dio ninguna
+        ContrasenaIncorrecta,   // se dio una contraseña y no sirvió
         NoEsArchivo,
         SinEspacio,
         Detenido,               // la persona lo detuvo ante una posible bomba de descompresión
@@ -45,8 +47,11 @@ namespace jicaro
         std::vector<Entrada> entradas;
         int64_t total = 0;          // suma de los tamaños conocidos
         int cifradas = 0;
+        bool cifradoSoportado = false;   // Jícaro puede abrir esas contraseñas (ZIP, y RAR y 7z con 7z.dll)
         bool completo = false;      // se leyó hasta el final
         bool suelto = false;        // un solo archivo comprimido (.gz, .bz2, .xz, .zst)
+        std::vector<std::wstring> faltan;   // partes que según el archivo siguen y no están
+        std::wstring clave;         // la contraseña que abrió la lista (cabeceras con contraseña): quien la usa la borra
     };
 
     // Topes contra las bombas de descompresión. Cada pregunta se hace una sola vez por extracción.
@@ -111,6 +116,9 @@ namespace jicaro
         bool pasarMarca = true;               // marca de la Web a lo extraído (si el archivo la tiene)
         std::wstring nombreSuelto;            // nombre para un .gz, .bz2, .xz o .zst de un solo archivo
         int64_t totalEsperado = 0;            // lo que se espera escribir (para el progreso); 0 si no se sabe
+        // Contraseña para probar primero, sin preguntar (la de la lista o la de --contrasena-stdin). Si no sirve, se
+        // pregunta con Preguntas::contrasena; si no hay a quién preguntar, queda como «contraseña incorrecta».
+        std::optional<std::wstring> contrasena;
     };
 
     struct Omitida
@@ -120,8 +128,9 @@ namespace jicaro
         enum class Tipo
         {
             Seguridad,   // ruta peligrosa, enlace, dispositivo: se salta a propósito
-            Cifrado,     // contraseña de un tipo que libarchive no abre
+            Cifrado,     // contraseña de un tipo que Jícaro no abre
             Falla,       // no se pudo leer, escribir o copiar
+            Clave,       // la contraseña no sirvió
         } tipo = Tipo::Seguridad;
     };
 
@@ -130,7 +139,9 @@ namespace jicaro
         Estado estado = Estado::Error;
         std::wstring mensaje;               // para la persona
         int64_t archivos = 0, carpetas = 0, saltados = 0, escritos = 0;
-        int64_t cifradas = 0;               // con contraseña de un tipo que libarchive no abre (RAR, 7z)
+        int64_t cifradas = 0;               // con contraseña de un tipo que Jícaro no abre
+        int64_t clavesMalas = 0;            // que no salieron porque la contraseña no sirvió
+        int64_t sinClave = 0;               // que no salieron porque tienen contraseña y no se dio
         int64_t rechazados = 0;             // saltados por seguridad
         int64_t fallidos = 0;               // que no se pudieron extraer por un error
         std::vector<Omitida> omitidas;      // todo lo anterior, con su ruta y su motivo
@@ -146,9 +157,12 @@ namespace jicaro
         }
     };
 
-    // Lee la lista del contenido. «nombreSuelto» se usa para un .gz de un solo archivo.
+    // Lee la lista del contenido. «nombreSuelto» se usa para un .gz de un solo archivo. Si la lista misma tiene
+    // contraseña (RAR o 7z con las cabeceras cifradas), se prueba «clave» y después se pregunta con
+    // preguntas->contrasena; la que sirvió vuelve en Contenido::clave.
     Contenido Listar(const std::vector<std::wstring>& partes, const std::wstring& nombreSuelto, Progreso& progreso,
-                     const std::atomic<bool>& cancelar);
+                     const std::atomic<bool>& cancelar, Preguntas* preguntas = nullptr,
+                     const std::optional<std::wstring>& clave = std::nullopt);
 
     // Extrae. Usa la carpeta de trabajo del proceso: no puede haber dos extracciones a la vez en el mismo proceso.
     Resumen Extraer(const Opciones& opciones, Preguntas& preguntas, Progreso& progreso, const std::atomic<bool>& cancelar);

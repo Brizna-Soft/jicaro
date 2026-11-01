@@ -31,9 +31,11 @@ namespace
     }
 }
 
-VentanaProgreso::VentanaProgreso(const std::wstring& archivo, Modo modo, const std::wstring& destino, jicaro::SiExiste siExiste)
+VentanaProgreso::VentanaProgreso(const std::wstring& archivo, Modo modo, const std::wstring& destino, jicaro::SiExiste siExiste,
+                                 std::optional<std::wstring> clave, bool claveDeStdin)
     : wxFrame(nullptr, wxID_ANY, L"Jícaro: extrayendo", wxDefaultPosition, wxDefaultSize, wxDEFAULT_FRAME_STYLE & ~wxMAXIMIZE_BOX),
-      m_reloj(this, RELOJ), m_cierre(this, CIERRE), m_archivo(archivo), m_destino(destino), m_modo(modo), m_siExiste(siExiste)
+      m_reloj(this, RELOJ), m_cierre(this, CIERRE), m_archivo(archivo), m_destino(destino), m_modo(modo), m_siExiste(siExiste),
+      m_clave(std::move(clave)), m_claveDeStdin(claveDeStdin)
 {
     SetIcon(wxICON(AAAA_APP));
     m_panel = new wxPanel(this);
@@ -87,6 +89,7 @@ VentanaProgreso::VentanaProgreso(const std::wstring& archivo, Modo modo, const s
 VentanaProgreso::~VentanaProgreso()
 {
     if (m_candado) CloseHandle((HANDLE)m_candado);
+    if (m_clave && !m_clave->empty()) SecureZeroMemory(m_clave->data(), m_clave->size() * sizeof(wchar_t));
 }
 
 bool VentanaProgreso::Empezar()
@@ -141,8 +144,10 @@ bool VentanaProgreso::Empezar()
     op.destino = m_destino;
     op.siExiste = m_siExiste;
     op.nombreSuelto = m_juego.nombreSuelto;
+    op.contrasena = m_clave;
     m_reloj.Start(150);
-    m_trabajo.Extraer(op, [this](jicaro::Resumen r) { AlTerminar(r); });
+    m_trabajo.Extraer(op, [this](jicaro::Resumen r) { AlTerminar(r); }, !m_claveDeStdin);
+    if (op.contrasena && !op.contrasena->empty()) SecureZeroMemory(op.contrasena->data(), op.contrasena->size() * sizeof(wchar_t));
     Raise();
     return true;
 }
@@ -167,7 +172,8 @@ void VentanaProgreso::AlTerminar(const jicaro::Resumen& r)
     switch (r.estado)
     {
     case jicaro::Estado::Bien:
-        if (r.cifradas > 0) codigo = SALIDA_CONTRASENA;
+        if (r.clavesMalas > 0) codigo = SALIDA_CONTRASENA_MALA;
+        else if (r.cifradas > 0 || r.sinClave > 0) codigo = SALIDA_CONTRASENA;
         else if (r.rechazados > 0 || r.fallidos > 0 || r.quitadosPorWindows > 0 || !r.aMedias.empty()) codigo = SALIDA_PARCIAL;
         else codigo = SALIDA_BIEN;
         break;
@@ -176,6 +182,7 @@ void VentanaProgreso::AlTerminar(const jicaro::Resumen& r)
     case jicaro::Estado::FaltaParte: codigo = SALIDA_FALTA_PARTE; break;
     case jicaro::Estado::CifradoNoSoportado:
     case jicaro::Estado::SinContrasena: codigo = SALIDA_CONTRASENA; break;
+    case jicaro::Estado::ContrasenaIncorrecta: codigo = SALIDA_CONTRASENA_MALA; break;
     default: codigo = SALIDA_ERROR;
     }
     if (r.aMedias.empty() && (m_cerrarAlTerminar || (r.estado == jicaro::Estado::Cancelado && r.archivos == 0)))

@@ -1,4 +1,4 @@
-﻿# Arma publicar\Jicaro-<versión>-x64.zip (programa y licencias) y su .sha256.
+﻿# Arma publicar\Jicaro-<versión>-x64.zip (programa, 7z.dll y licencias) y su .sha256.
 # Antes hay que compilar con compilar.ps1.
 $ErrorActionPreference = 'Stop'
 $raiz = $PSScriptRoot
@@ -9,18 +9,21 @@ $nombre = "Jicaro-$version-x64"
 $temporal = Join-Path $publicar $nombre
 
 if (-not (Test-Path (Join-Path $programa 'Jicaro.exe'))) { throw "Falta Jicaro.exe en ${programa}. Compila primero." }
+if (-not (Test-Path (Join-Path $programa '7z.dll'))) { throw "Falta 7z.dll en ${programa}. Compila primero." }
 & (Join-Path $raiz 'generar-avisos.ps1')
 
 if (Test-Path $temporal) { Remove-Item -Recurse -Force $temporal }
 New-Item -ItemType Directory -Force $temporal | Out-Null
 Copy-Item (Join-Path $programa 'Jicaro.exe') $temporal
+Copy-Item (Join-Path $programa '7z.dll') $temporal
 Copy-Item (Join-Path $raiz 'LICENSE') (Join-Path $temporal 'LICENCIA.txt')
 Copy-Item (Join-Path $raiz 'AVISOS-DE-TERCEROS.txt') $temporal
 $leeme = @"
 Jícaro $version - descompresor gratis de Brizna Soft
 ====================================================
 
-1. Abre Jicaro.exe (no hace falta instalar nada).
+1. Abre Jicaro.exe (no hace falta instalar nada). Deja 7z.dll en la misma carpeta: con ese archivo Jícaro abre
+   los RAR y los 7z.
 2. Si Windows dice "Windows protegió su PC": pulsa "Más información" y luego "Ejecutar de todas formas".
    Sale porque el programa es nuevo y todavía no tiene firma digital.
 3. Arrastra un archivo comprimido a la ventana, o pulsa "Abrir...". Con una parte de un RAR en varias partes
@@ -28,8 +31,12 @@ Jícaro $version - descompresor gratis de Brizna Soft
 4. Para tener "Extraer aquí" en el clic derecho: pulsa "Ajustes" y marca la casilla. En Windows 11 sale en
    "Mostrar más opciones". Antes de borrar Jícaro, desmarca esa casilla.
 
-Abre: ZIP (también con contraseña), RAR, RAR 5 y RAR en varias partes, 7z, TAR, GZ, BZ2, XZ, ZST, ISO y CAB.
-No abre los RAR ni los 7z con contraseña: para esos usa 7-Zip o WinRAR. Jícaro solo extrae: no crea RAR.
+Abre: ZIP, RAR, RAR 5 y 7z (también con contraseña y en varias partes), TAR, GZ, BZ2, XZ, ZST, ISO y CAB.
+Si un archivo tiene contraseña, Jícaro te la pide; si no sirve, te avisa y te la pide otra vez. Jícaro solo extrae:
+no crea RAR.
+
+7z.dll es de 7-Zip (de Igor Pavlov, licencia GNU LGPL; su código fuente está en https://www.7-zip.org).
+Las licencias de todo lo que usa Jícaro están en AVISOS-DE-TERCEROS.txt.
 
 Ayuda y reportes de problemas: https://github.com/Brizna-Soft/jicaro
 Sin publicidad, sin virus y sin recoger tus datos. Licencia MIT.

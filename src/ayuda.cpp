@@ -175,8 +175,9 @@ void ayuda::MostrarAcercaDe(wxWindow* padre, const wxString& descripcion)
         L"Hecho por Brizna Soft. Gratis y de código abierto (licencia MIT).\n"
         L"Sin publicidad, sin virus y sin recoger tus datos.\n"
         L"Hecho con ayuda de IA.\n\n"
-        L"Usa libarchive (licencia BSD), wxWidgets y otras bibliotecas libres. Sus avisos de licencia están en el "
-        L"archivo AVISOS-DE-TERCEROS.txt, junto al programa.";
+        L"Usa libarchive (licencia BSD), wxWidgets y otras bibliotecas libres, y 7z.dll de 7-Zip (de Igor Pavlov, "
+        L"licencia GNU LGPL; su código está en www.7-zip.org). Sus avisos de licencia están en el archivo "
+        L"AVISOS-DE-TERCEROS.txt, junto al programa.";
     auto* cuerpo = new wxStaticText(&d, wxID_ANY, texto);
     cuerpo->Wrap(d.FromDIP(440));
     caja->Add(cuerpo, 0, wxLEFT | wxRIGHT, d.FromDIP(16));

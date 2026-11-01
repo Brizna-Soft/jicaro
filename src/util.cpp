@@ -11,6 +11,16 @@
 
 std::wstring jicaro::CarpetaDatos()
 {
+    // JICARO_CARPETA_DATOS (una ruta completa) cambia dónde se guardan los ajustes y el registro: sirve para probar una
+    // copia de Jícaro sin tocar los ajustes de la que está instalada
+    wchar_t propia[MAX_PATH] = {};
+    DWORD n = GetEnvironmentVariableW(L"JICARO_CARPETA_DATOS", propia, MAX_PATH);
+    if (n > 3 && n < MAX_PATH && propia[1] == L':' && propia[2] == L'\\')
+    {
+        std::wstring r(propia, n);
+        CreateDirectoryW(r.c_str(), nullptr);
+        return r;
+    }
     PWSTR ruta = nullptr;
     std::wstring r;
     if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData, KF_FLAG_CREATE, nullptr, &ruta))) r = ruta;

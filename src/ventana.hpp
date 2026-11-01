@@ -7,6 +7,7 @@
 #include <wx/timer.h>
 
 #include <functional>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -68,6 +69,8 @@ private:
     bool m_hayArchivo = false, m_listando = false, m_extrayendo = false, m_cerrarAlTerminar = false;
     std::function<void()> m_despuesDeListar;
     wxTimer m_reloj;
+    std::optional<std::wstring> m_clave;   // la contraseña que ya sirvió con este archivo (se borra al abrir otro)
+    void BorrarClave();
 
     wxPanel* m_panel = nullptr;
     wxBoxSizer* m_caja = nullptr;

@@ -17,6 +17,7 @@
 
 #include "comun.hpp"
 #include "marca.hpp"
+#include "motor7z.hpp"
 #include "rutas.hpp"
 
 namespace
@@ -24,6 +25,13 @@ namespace
     using namespace jicaro;
 
     constexpr size_t TamanoBloque = 1 << 20;
+
+    // Las contraseñas se borran de la memoria apenas dejan de hacer falta
+    void BorrarTexto(std::wstring& s)
+    {
+        if (!s.empty()) SecureZeroMemory(s.data(), s.size() * sizeof(wchar_t));
+        s.clear();
+    }
 
     // Lectura propia con las funciones de Windows. Todas las partes se le muestran a libarchive como un solo archivo
     // seguido (así son los RAR en varias partes y los .001, .002...), con un solo «client data»: con varios,
@@ -72,6 +80,8 @@ namespace
         // Contraseñas (solo ZIP): libarchive llama aquí cuando ninguna de las ya dadas sirve
         const char* SiguienteContrasena();
         void PonerEntrada(const std::wstring& ruta) { m_entrada = ruta; }
+        // La que se prueba primero, sin preguntar (la de --contrasena-stdin, o la que ya se escribió)
+        void PonerPrevia(const std::optional<std::wstring>& clave) { m_previa = clave; }
 
         la_ssize_t Leer(archive* ar, const void** buffer)
         {
@@ -137,7 +147,8 @@ namespace
         archive* a = nullptr;
         bool cancelado = false;
         bool finDeLaUltima = false;    // se leyó hasta el final de la última parte
-        bool personaCancelo = false;   // no dio la contraseña
+        bool personaCancelo = false;   // no dio la contraseña (o no dio otra después de una que no sirvió)
+        bool claveMala = false;        // se dio una contraseña, no sirvió y no hubo otra
         bool m_noAbrio = false;
         size_t m_parteQueFallo = 0;
 
@@ -203,6 +214,8 @@ namespace
         bool m_yaPidio = false;
         std::string m_devuelta;
         std::wstring m_entrada;
+        std::optional<std::wstring> m_previa;
+        bool m_usoPrevia = false;
     };
 
     int AlAbrir(archive*, void*) { return ARCHIVE_OK; }
@@ -257,18 +270,29 @@ namespace
 
     const char* Lector::SiguienteContrasena()
     {
-        if (personaCancelo || !m_preguntas || !m_preguntas->contrasena) return nullptr;
+        if (personaCancelo) return nullptr;
         if (m_siguiente < m_candidatas.size())
         {
             m_devuelta = m_candidatas[m_siguiente++];
             return m_devuelta.c_str();
         }
         if (Cancelar()) return nullptr;
-        auto clave = m_preguntas->contrasena(m_entrada, m_yaPidio);
+        // Primero la que ya vino, sin preguntar; después se pregunta (si hay a quién). Nunca se prueban claves por
+        // cuenta propia: solo variantes de la que se escribió (UTF-8 y las páginas de códigos de Windows).
+        const bool otraVez = m_yaPidio;
+        std::optional<std::wstring> clave;
+        if (m_previa && !m_usoPrevia)
+        {
+            m_usoPrevia = true;
+            clave = m_previa;
+        }
+        else if (m_preguntas && m_preguntas->contrasena)
+            clave = m_preguntas->contrasena(m_entrada, otraVez);
         m_yaPidio = true;
         if (!clave || clave->empty())
         {
             personaCancelo = true;
+            claveMala = otraVez;
             return nullptr;
         }
         m_candidatas = Variantes(*clave);
@@ -380,8 +404,9 @@ namespace
         std::wstring cual = formato == ARCHIVE_FORMAT_7ZIP ? L"7z" : (formato == ARCHIVE_FORMAT_ZIP ? L"ZIP" : L"RAR");
         if (formato == ARCHIVE_FORMAT_ZIP)
             return L"Este ZIP usa un tipo de cifrado que Jícaro no puede abrir.";
-        return L"Este " + cual + L" está protegido con contraseña, y Jícaro todavía no puede abrir los " + cual +
-               L" con contraseña. Para este archivo usa otro programa, como 7-Zip o WinRAR.";
+        // Solo pasa si falta 7z.dll (sin ella, libarchive lee los RAR y 7z, pero no los que tienen contraseña)
+        return L"Este " + cual + L" está protegido con contraseña. Para abrirlo, Jícaro necesita el archivo 7z.dll junto a "
+               L"Jicaro.exe, y no está: vuelve a bajar Jícaro y descomprímelo entero.";
     }
 
     std::wstring Detalle(const char* error)
@@ -417,8 +442,16 @@ namespace
         }
         if (l.personaCancelo)
         {
-            estado = Estado::SinContrasena;
-            mensaje = L"Hacía falta la contraseña y no se dio, así que no se extrajo.";
+            if (l.claveMala)
+            {
+                estado = Estado::ContrasenaIncorrecta;
+                mensaje = L"La contraseña no es correcta, así que no se extrajo.";
+            }
+            else
+            {
+                estado = Estado::SinContrasena;
+                mensaje = L"Hacía falta la contraseña y no se dio, así que no se extrajo.";
+            }
             return;
         }
         if (l.m_noAbrio)
@@ -613,8 +646,20 @@ namespace
 
     private:
         using Tipo = Omitida::Tipo;
+        class Destino7z;
 
         void Bucle(Lector& lector, CarpetaDeTrabajo& trabajo, archive* w);
+        void EjecutarLibarchive();
+        void Ejecutar7z(motor7z::Formato formato);
+        void Bucle7z(motor7z::Archivo& arc, CarpetaDeTrabajo& trabajo, archive* w);
+        // 7z con un método que 7z.dll no trae: esos archivos se prueban con libarchive
+        void ProbarConLibarchive(const std::vector<motor7z::Item>& items, const std::vector<uint32_t>& indices,
+                                 CarpetaDeTrabajo& trabajo, archive* w);
+        // La contraseña que toca ahora: primero la que ya se tiene; si no (o si «otraVez»), se pregunta
+        std::optional<std::wstring> PedirClave(const std::wstring& entrada, bool otraVez);
+        bool Paro() const;
+        // La carpeta de trabajo y el escritor de libarchive (con sus defensas), y la limpieza si algo falla en medio
+        void ConEscritor(const std::function<void(CarpetaDeTrabajo&, archive*)>& cuerpo);
         bool Elegida(const std::wstring& cruda) const;
         void Omitir(const std::wstring& ruta, const std::wstring& motivo, Tipo tipo = Tipo::Seguridad);
         std::optional<std::wstring> Preparar(const std::wstring& cruda, bool carpeta);
@@ -654,6 +699,11 @@ namespace
         bool m_sinEspacio = false;
         int m_formatoCifrado = 0;
         bool m_soloSuelto = false, m_tarVacio = false;
+        int64_t m_comprimido = 1;               // lo que pesa el archivo comprimido (para la proporción de las bombas)
+        std::optional<std::wstring> m_clave;    // la contraseña que se está usando (RAR y 7z)
+        bool m_dioClave = false;                // se dio alguna: si no sirve, es «contraseña incorrecta»
+        int64_t m_incompletos = 0;              // RAR y 7z: archivos que se acabaron antes de tiempo
+        motor7z::Formato m_formato7z = motor7z::Formato::SieteZ;
     };
 
     void Extraccion::Omitir(const std::wstring& ruta, const std::wstring& motivo, Tipo tipo)
@@ -828,7 +878,7 @@ namespace
     // Topes contra las bombas mientras crece lo extraído (datos y huecos). false: hay que parar.
     bool Extraccion::Controlar(int64_t nuevos)
     {
-        const int64_t comprimido = std::max<int64_t>(m_lector->Total(), 1);
+        const int64_t comprimido = std::max<int64_t>(m_comprimido, 1);
         m_res.escritos += nuevos;
         m_prog.escritos += nuevos;
         if (!m_preguntoProporcion && m_res.escritos >= m_op.limites.bytesMinimos
@@ -874,7 +924,7 @@ namespace
     bool Extraccion::ControlarAntes(int64_t anunciado)
     {
         if (anunciado <= 0) return true;
-        const int64_t comprimido = std::max<int64_t>(m_lector->Total(), 1);
+        const int64_t comprimido = std::max<int64_t>(m_comprimido, 1);
         int64_t libre = EspacioLibre(m_destino);
         if (libre >= 0 && anunciado > libre - m_op.limites.libreMinimo)
         {
@@ -1270,6 +1320,589 @@ namespace
         }
     }
 
+    bool Extraccion::Paro() const
+    {
+        return m_cancelar || m_parar || m_detenido || m_sinEspacio || m_res.estado != Estado::Bien;
+    }
+
+    std::optional<std::wstring> Extraccion::PedirClave(const std::wstring& entrada, bool otraVez)
+    {
+        if (!otraVez && m_clave) return m_clave;
+        if (!m_pr.contrasena || m_cancelar) return std::nullopt;
+        auto c = m_pr.contrasena(entrada, otraVez);
+        if (!c || c->empty()) return std::nullopt;
+        m_dioClave = true;
+        m_clave = c;
+        return c;
+    }
+
+    void Extraccion::ConEscritor(const std::function<void(CarpetaDeTrabajo&, archive*)>& cuerpo)
+    {
+        CarpetaDeTrabajo trabajo(m_destino);
+        if (!trabajo.ok)
+        {
+            m_res.mensaje = L"No se pudo usar la carpeta de destino (¿la ruta es muy larga?).";
+            return;
+        }
+        // Defensas de libarchive: sin rutas absolutas, sin «..», sin escribir a través de enlaces y sin reemplazar nada
+        // (Jícaro pregunta antes y manda lo anterior a la Papelera)
+        EscritorPropio w(archive_write_disk_new());
+        if (!w)
+        {
+            m_res.mensaje = L"No alcanzó la memoria para extraer.";
+            return;
+        }
+        archive_write_disk_set_options(w.get(), ARCHIVE_EXTRACT_TIME | ARCHIVE_EXTRACT_SECURE_SYMLINKS
+                                                    | ARCHIVE_EXTRACT_SECURE_NODOTDOT | ARCHIVE_EXTRACT_SECURE_NOABSOLUTEPATHS
+                                                    | ARCHIVE_EXTRACT_NO_OVERWRITE);
+        m_res.estado = Estado::Bien;
+        try
+        {
+            cuerpo(trabajo, w.get());
+        }
+        catch (...)
+        {
+            // Sin memoria u otra falla rara: se conserva lo que ya se sabe y se limpia el archivo en curso
+            m_res.estado = Estado::Error;
+            try
+            {
+                if (m_enCurso.activo)
+                {
+                    archive_write_finish_entry(w.get());
+                    m_enCurso.activo = false;
+                    QuitarAMedias(m_enCurso.completa, m_enCurso.relativa, m_enCurso.id);
+                }
+                m_res.mensaje = L"No alcanzó la memoria, o algo salió mal, y la extracción se detuvo.";
+            }
+            catch (...)
+            {
+            }
+        }
+        // «w» se cierra aquí, todavía con la carpeta de trabajo puesta (fechas de las carpetas)
+    }
+
+    void Extraccion::EjecutarLibarchive()
+    {
+        Lector lector(m_partesCompletas, m_prog, m_cancelar);
+        m_lector = &lector;
+        m_comprimido = lector.Total();
+        lector.PonerPrevia(m_clave);
+        if (!lector.Abrir(&m_pr, m_soloSuelto)) Clasificar(lector, m_res.estado, m_res.mensaje);
+        else ConEscritor([&](CarpetaDeTrabajo& trabajo, archive* w) { Bucle(lector, trabajo, w); });
+        m_lector = nullptr;
+    }
+
+    // ---------- RAR y 7z con 7z.dll: las mismas defensas, con los datos que entrega 7z.dll ----------
+
+    uint64_t MemoriaPermitida()
+    {
+        uint64_t limite = 4ULL << 30;   // lo mismo que 7-Zip deja usar sin preguntar
+        MEMORYSTATUSEX m{};
+        m.dwLength = sizeof(m);
+        if (GlobalMemoryStatusEx(&m) && m.ullTotalPhys > 0) limite = std::min<uint64_t>(limite, m.ullTotalPhys / 4 * 3);
+        return limite;
+    }
+
+    // FILETIME (cada 100 ns desde 1601) a segundos y nanosegundos desde 1970
+    bool AUnix(const FILETIME& f, int64_t& segundos, long& nano)
+    {
+        uint64_t t = ((uint64_t)f.dwHighDateTime << 32) | f.dwLowDateTime;
+        if (t > (uint64_t)INT64_MAX) return false;
+        int64_t v = (int64_t)t - 116444736000000000LL;
+        segundos = v / 10000000;
+        int64_t resto = v % 10000000;
+        if (resto < 0)
+        {
+            resto += 10000000;
+            segundos--;
+        }
+        nano = (long)(resto * 100);
+        return true;
+    }
+
+    void PonerFechas(const motor7z::Item& it, archive_entry* e)
+    {
+        int64_t s = 0;
+        long ns = 0;
+        if (it.conMTime && AUnix(it.mtime, s, ns)) archive_entry_set_mtime(e, (time_t)s, ns);
+        if (it.conATime && AUnix(it.atime, s, ns)) archive_entry_set_atime(e, (time_t)s, ns);
+        if (it.conCTime && AUnix(it.ctime, s, ns)) archive_entry_set_birthtime(e, (time_t)s, ns);
+    }
+
+    std::wstring MensajeFalta(const std::wstring& parte)
+    {
+        return L"Falta la parte «" + parte + L"». Revisa que se hayan bajado todas las partes y que estén en la misma carpeta.";
+    }
+
+    // Lo que hace Jícaro con cada archivo que entrega 7z.dll: lo mismo que con libarchive (rutas, topes, marca de la
+    // Web, limpieza de lo que queda a medias)
+    class Extraccion::Destino7z final : public motor7z::Destino
+    {
+    public:
+        Destino7z(Extraccion& x, const motor7z::Archivo& arc, CarpetaDeTrabajo& trabajo, archive* w)
+            : x(x), m_items(arc.Items()), m_trabajo(trabajo), m_w(w), m_faltaVolumen(!arc.FaltaVolumen().empty())
+        {
+        }
+
+        std::vector<uint32_t> clavesMalas;   // no salieron porque la contraseña no sirvió (se puede probar otra)
+        std::vector<uint32_t> metodoDesconocido;   // un método que 7z.dll no trae (por ejemplo, zstd en un 7z)
+        bool sinClave = false;               // se pidió la contraseña y no se dio
+        bool memoriaNegada = false;
+        uint64_t memoriaPedida = 0;
+        bool carpetaCambio = false;
+
+        motor7z::Paso Empieza(uint32_t indice) override
+        {
+            if (x.m_cancelar || indice >= m_items.size()) return motor7z::Paso::Parar;
+            const auto& it = m_items[indice];
+            m_cruda = it.ruta;
+            m_cifrada = it.cifrada;
+            m_indice = indice;
+            x.m_prog.PonerActual(m_cruda);
+            auto relativa = x.Preparar(m_cruda, false);
+            if (x.m_parar) return motor7z::Paso::Parar;
+            if (!relativa) return motor7z::Paso::Saltar;
+            std::wstring completa = rutas::Unir(x.m_destino, *relativa);
+            // Topes con el tamaño anunciado, antes de crear nada
+            if (it.tamano > 0 && !x.ControlarAntes(it.tamano)) return motor7z::Paso::Parar;
+            if (!m_trabajo.Sigue())
+            {
+                carpetaCambio = true;
+                x.m_res.estado = Estado::Error;
+                x.m_res.mensaje = L"Algo cambió la carpeta de trabajo en medio de la extracción; se detuvo por seguridad.";
+                return motor7z::Paso::Parar;
+            }
+            if (!x.SigueSeguro(*relativa) || GetFileAttributesW(rutas::Larga(completa).c_str()) != INVALID_FILE_ATTRIBUTES)
+            {
+                x.Omitir(m_cruda, L"la carpeta cambió mientras se extraía; no se tocó");
+                return motor7z::Paso::Saltar;
+            }
+            x.m_enCurso.activo = false;
+            x.m_enCurso.completa = completa;
+            x.m_enCurso.relativa = *relativa;
+            EntradaPropia s(archive_entry_new());
+            if (!s) throw std::bad_alloc();
+            archive_entry_copy_pathname_w(s.get(), relativa->c_str());
+            archive_entry_set_filetype(s.get(), AE_IFREG);
+            archive_entry_set_perm(s.get(), 0644);
+            if (it.tamano >= 0) archive_entry_set_size(s.get(), it.tamano);
+            PonerFechas(it, s.get());
+            if (archive_write_header(m_w, s.get()) < ARCHIVE_WARN)
+            {
+                x.Omitir(m_cruda, L"no se pudo crear el archivo", Tipo::Falla);
+                archive_write_finish_entry(m_w);
+                return motor7z::Paso::Saltar;
+            }
+            // libarchive lo crea y lo tiene abierto sin compartir; si no, es que justo apareció otro con ese nombre
+            if (!AbiertoSinCompartir(completa))
+            {
+                archive_write_finish_entry(m_w);
+                x.Omitir(m_cruda, L"apareció otro archivo con ese nombre mientras se extraía; no se tocó", Tipo::Falla);
+                return motor7z::Paso::Saltar;
+            }
+            x.m_enCurso.id = IdentidadDe(completa);
+            x.m_enCurso.activo = true;
+            m_completa = completa;
+            m_relativa = *relativa;
+            m_activo = true;
+            m_escrito = 0;
+            m_fallaEscritura = false;
+            return motor7z::Paso::Escribir;
+        }
+
+        bool Datos(const void* datos, size_t tamano) override
+        {
+            if (!m_activo) return true;
+            if (x.m_cancelar) return false;
+            if (m_fallaEscritura) return true;   // lo que falta de este archivo se descarta
+            if (archive_write_data_block(m_w, datos, tamano, m_escrito) < ARCHIVE_OK)
+            {
+                int64_t libre = EspacioLibre(x.m_destino);
+                if (libre >= 0 && libre < (64LL << 20))
+                {
+                    x.m_sinEspacio = true;
+                    return false;
+                }
+                m_fallaEscritura = true;
+                return true;
+            }
+            m_escrito += (int64_t)tamano;
+            return x.Controlar((int64_t)tamano);
+        }
+
+        void Termina(int32_t resultado) override
+        {
+            if (!m_activo) return;
+            m_activo = false;
+            int fin = archive_write_finish_entry(m_w);
+            x.m_enCurso.activo = false;
+            if (resultado == motor7z::kBien && !m_fallaEscritura && fin >= ARCHIVE_WARN)
+            {
+                x.m_res.archivos++;
+                x.m_prog.archivos++;
+                x.m_hechos[m_cruda] = { m_completa, x.m_enCurso.id };
+                x.Marcar(m_completa, m_relativa);
+                return;
+            }
+            x.QuitarAMedias(m_completa, m_relativa, x.m_enCurso.id);
+            if (m_fallaEscritura || fin < ARCHIVE_WARN)
+            {
+                x.Omitir(m_cruda, L"no se pudo escribir en el disco", Tipo::Falla);
+                return;
+            }
+            Fallo(m_indice, m_cruda, m_cifrada, resultado);
+        }
+
+        void SinDatos(uint32_t indice, int32_t resultado) override
+        {
+            if (resultado == motor7z::kBien || indice >= m_items.size()) return;
+            Fallo(indice, m_items[indice].ruta, m_items[indice].cifrada, resultado);
+        }
+
+        void Fallo(uint32_t indice, const std::wstring& cruda, bool cifrada, int32_t resultado)
+        {
+            // La contraseña no sirvió: RAR 5 lo sabe (trae con qué comprobarla). En RAR 4 y 7z no hay cómo comprobarla:
+            // un dato que no cuadra en un archivo con contraseña casi siempre es la contraseña (si no falta una parte).
+            const bool sinComprobar = x.m_formato7z != motor7z::Formato::Rar5 && !m_faltaVolumen;
+            if (resultado == motor7z::kClaveIncorrecta
+                || (cifrada && sinComprobar && (resultado == motor7z::kDatosDanados || resultado == motor7z::kCrcMalo)))
+            {
+                clavesMalas.push_back(indice);
+                return;
+            }
+            if (m_faltaVolumen && resultado != motor7z::kMetodoDesconocido) resultado = motor7z::kFinInesperado;
+            switch (resultado)
+            {
+            case motor7z::kFinInesperado:
+            case motor7z::kNoDisponible:
+                x.m_incompletos++;
+                x.Omitir(cruda, L"está incompleto (¿falta una parte o no se terminó de bajar?)", Tipo::Falla);
+                break;
+            case motor7z::kMetodoDesconocido: metodoDesconocido.push_back(indice); break;
+            default: x.Omitir(cruda, L"está dañado: los datos no coinciden con su suma de control", Tipo::Falla); break;
+            }
+        }
+
+        std::optional<std::wstring> Clave() override
+        {
+            if (x.m_cancelar) return std::nullopt;
+            auto c = x.PedirClave(m_cruda, false);
+            if (!c) sinClave = true;
+            return c;
+        }
+
+        bool Memoria(uint64_t bytes) override
+        {
+            if (bytes <= MemoriaPermitida()) return true;
+            memoriaNegada = true;
+            memoriaPedida = bytes;
+            return false;
+        }
+
+        // Después de cada vuelta de 7z.dll: lo que quedó a medias se quita y se dice por qué se cortó
+        void Despues(HRESULT hr)
+        {
+            if (m_activo)
+            {
+                m_activo = false;
+                archive_write_finish_entry(m_w);
+                x.m_enCurso.activo = false;
+                x.QuitarAMedias(m_completa, m_relativa, x.m_enCurso.id);
+            }
+            if (hr == S_OK || x.Paro()) return;   // si se detuvo por algo que ya se sabe, eso es lo que se dice
+            if (sinClave)
+            {
+                x.m_res.estado = x.m_dioClave ? Estado::ContrasenaIncorrecta : Estado::SinContrasena;
+                x.m_res.mensaje = x.m_dioClave ? L"La contraseña no es correcta, así que no se extrajo todo."
+                                               : L"Hacía falta la contraseña y no se dio, así que no se extrajo.";
+                return;
+            }
+            x.m_res.estado = Estado::Error;
+            if (memoriaNegada)
+                x.m_res.mensaje = L"Este archivo necesita " + TextoTamano((int64_t)memoriaPedida) +
+                    L" de memoria para descomprimirse, más de lo que Jícaro se permite usar en esta PC.";
+            else if (hr == E_OUTOFMEMORY)
+                x.m_res.mensaje = L"No alcanzó la memoria para extraer este archivo.";
+            else
+                x.m_res.mensaje = L"El archivo está dañado o no se puede leer.";
+        }
+
+    private:
+        Extraccion& x;
+        const std::vector<motor7z::Item>& m_items;
+        CarpetaDeTrabajo& m_trabajo;
+        archive* m_w;
+        std::wstring m_cruda, m_completa, m_relativa;
+        uint32_t m_indice = 0;
+        bool m_cifrada = false, m_activo = false, m_fallaEscritura = false;
+        const bool m_faltaVolumen;
+        int64_t m_escrito = 0;
+    };
+
+    void Extraccion::Bucle7z(motor7z::Archivo& arc, CarpetaDeTrabajo& trabajo, archive* w)
+    {
+        const auto& items = arc.Items();
+        int64_t elegidos = 0;
+        for (const auto& it : items)
+            if (Elegida(it.ruta)) elegidos++;
+        if (elegidos > m_op.limites.entradas && !m_preguntoCantidad)
+        {
+            m_preguntoCantidad = true;
+            if (!Preguntar(L"El archivo trae más de " + TextoNumero(m_op.limites.entradas) +
+                           L" archivos. Puede ser una trampa para llenar el disco."))
+            {
+                m_detenido = true;
+                return;
+            }
+        }
+
+        // Primero lo que no se extrae y las carpetas; los archivos van a 7z.dll en orden
+        std::vector<uint32_t> pedir, enlaces;
+        for (uint32_t i = 0; i < (uint32_t)items.size(); i++)
+        {
+            if (m_cancelar)
+            {
+                m_res.estado = Estado::Cancelado;
+                return;
+            }
+            const auto& it = items[i];
+            const std::wstring& cruda = it.ruta;
+            if (!Elegida(cruda)) continue;
+            if (it.anti)
+            {
+                Omitir(cruda, L"es una marca para borrar un archivo; Jícaro no borra nada");
+                continue;
+            }
+            if (it.alterno)
+            {
+                Omitir(cruda, L"es un flujo alterno de NTFS; Jícaro no los crea por seguridad");
+                continue;
+            }
+            if (it.simbolico)
+            {
+                Omitir(cruda, L"es un enlace simbólico; Jícaro no crea enlaces por seguridad");
+                continue;
+            }
+            if (it.especial)
+            {
+                Omitir(cruda, L"no es un archivo común (es un dispositivo o algo parecido)");
+                continue;
+            }
+            // Con contraseña y sin de dónde sacarla (ni la que vino ni a quién preguntar): se salta y lo demás sale igual
+            if (it.cifrada && !it.carpeta && !m_clave && !m_pr.contrasena)
+            {
+                Omitir(cruda, L"tiene contraseña y no se dio", Tipo::Clave);
+                m_res.sinClave++;
+                continue;
+            }
+            // Enlace duro o copia (RAR 5): al final se copia lo que ya salió, como con libarchive
+            if (!it.duro.empty() && !it.carpeta)
+            {
+                enlaces.push_back(i);
+                continue;
+            }
+            if (it.carpeta)
+            {
+                m_prog.PonerActual(cruda);
+                auto relativa = Preparar(cruda, true);
+                if (m_parar) return;
+                if (!relativa) continue;
+                if (!trabajo.Sigue())
+                {
+                    m_res.estado = Estado::Error;
+                    m_res.mensaje = L"Algo cambió la carpeta de trabajo en medio de la extracción; se detuvo por seguridad.";
+                    return;
+                }
+                if (!SigueSeguro(*relativa))
+                {
+                    Omitir(cruda, L"la carpeta cambió mientras se extraía; no se tocó");
+                    continue;
+                }
+                EntradaPropia s(archive_entry_new());
+                if (!s) throw std::bad_alloc();
+                archive_entry_copy_pathname_w(s.get(), relativa->c_str());
+                archive_entry_set_filetype(s.get(), AE_IFDIR);
+                archive_entry_set_perm(s.get(), 0755);
+                PonerFechas(it, s.get());
+                if (archive_write_header(w, s.get()) < ARCHIVE_WARN) Omitir(cruda, L"no se pudo crear la carpeta", Tipo::Falla);
+                else m_res.carpetas++;
+                archive_write_finish_entry(w);
+                continue;
+            }
+            pedir.push_back(i);
+        }
+
+        Destino7z d(*this, arc, trabajo, w);
+        HRESULT hr = arc.Extraer(pedir, d);
+        d.Despues(hr);
+        // Los que no salieron porque la contraseña no sirvió: se pregunta otra (si hay a quién) y se prueban solo esos.
+        // Nunca se prueban claves por cuenta propia.
+        while (!d.clavesMalas.empty() && !Paro() && m_pr.contrasena)
+        {
+            auto c = PedirClave(items[d.clavesMalas.front()].ruta, true);
+            if (!c) break;
+            std::vector<uint32_t> otraVez;
+            otraVez.swap(d.clavesMalas);
+            hr = arc.Extraer(otraVez, d);
+            d.Despues(hr);
+        }
+        for (uint32_t i : d.clavesMalas)
+        {
+            Omitir(items[i].ruta, m_formato7z == motor7z::Formato::Rar5 ? L"la contraseña no sirvió"
+                                                                         : L"la contraseña no sirvió (o el archivo está dañado)",
+                   Tipo::Clave);
+            m_res.clavesMalas++;
+        }
+        if (!d.metodoDesconocido.empty()) ProbarConLibarchive(items, d.metodoDesconocido, trabajo, w);
+
+        // Enlaces duros y copias: se copia el archivo que ya salió en esta extracción, con los mismos topes
+        for (uint32_t i : enlaces)
+        {
+            if (Paro()) break;
+            const auto& it = items[i];
+            auto o = m_hechos.find(it.duro);
+            if (o == m_hechos.end())
+            {
+                Omitir(it.ruta, L"es un enlace a algo que no se extrajo; Jícaro no crea enlaces");
+                continue;
+            }
+            Hecho origen = o->second;
+            m_prog.PonerActual(it.ruta);
+            auto relativa = Preparar(it.ruta, false);
+            if (m_parar) break;
+            if (!relativa) continue;
+            if (!CopiarEnlace(origen, *relativa, it.ruta)) break;
+        }
+    }
+
+    void Extraccion::ProbarConLibarchive(const std::vector<motor7z::Item>& items, const std::vector<uint32_t>& indices,
+                                         CarpetaDeTrabajo& trabajo, archive* w)
+    {
+        // 7z con un método que 7z.dll no trae (por ejemplo zstd, del 7-Zip modificado): se prueban esos con libarchive,
+        // que sí lo conoce, con las mismas defensas
+        if (m_formato7z == motor7z::Formato::SieteZ && !Paro())
+        {
+            auto elegidas = std::move(m_elegidas);
+            m_elegidas.clear();
+            for (uint32_t i : indices) m_elegidas.insert(items[i].ruta);
+            const Estado estadoAntes = m_res.estado;
+            const std::wstring mensajeAntes = m_res.mensaje;
+            {
+                Lector lector(m_partesCompletas, m_prog, m_cancelar);
+                m_lector = &lector;
+                lector.PonerPrevia(m_clave);
+                if (lector.Abrir(&m_pr, false)) Bucle(lector, trabajo, w);
+                m_lector = nullptr;
+            }
+            m_elegidas = std::move(elegidas);
+            // Una falla de libarchive aquí no cambia el resultado de todo lo demás
+            if (m_res.estado != Estado::Bien && !m_cancelar && !m_parar && !m_detenido && !m_sinEspacio)
+            {
+                m_res.estado = estadoAntes;
+                m_res.mensaje = mensajeAntes;
+            }
+        }
+        for (uint32_t i : indices)
+        {
+            const std::wstring& cruda = items[i].ruta;
+            bool omitida = std::any_of(m_res.omitidas.begin(), m_res.omitidas.end(), [&](const Omitida& o) { return o.ruta == cruda; });
+            if (!m_hechos.count(cruda) && !omitida) Omitir(cruda, L"usa un método de compresión que Jícaro no conoce", Tipo::Falla);
+        }
+    }
+
+    void Extraccion::Ejecutar7z(motor7z::Formato formato)
+    {
+        m_formato7z = formato;
+        motor7z::Archivo arc;
+        motor7z::Apertura ap = motor7z::Apertura::Error;
+        // Si la lista tiene contraseña, 7z.dll la pide al abrir. Si no sirve, se pregunta otra (si hay a quién).
+        for (int intento = 0;; intento++)
+        {
+            const bool otraVez = intento > 0;
+            ap = arc.Abrir(m_partesCompletas, formato, [this, otraVez]() { return PedirClave(L"", otraVez); }, m_prog, m_cancelar);
+            if (ap != motor7z::Apertura::ClaveMala) break;
+            if (m_clave) BorrarTexto(*m_clave);
+            m_clave.reset();
+            if (!m_pr.contrasena || m_cancelar) break;
+        }
+        m_comprimido = std::max<int64_t>(arc.TotalComprimido(), 1);
+        const bool varias = m_partesCompletas.size() > 1;
+        switch (ap)
+        {
+        case motor7z::Apertura::Bien: break;
+        case motor7z::Apertura::Cancelado:
+            m_res.estado = Estado::Cancelado;
+            m_res.mensaje = L"Se canceló.";
+            return;
+        case motor7z::Apertura::SinClave:
+            m_res.estado = m_dioClave ? Estado::ContrasenaIncorrecta : Estado::SinContrasena;
+            m_res.mensaje = m_dioClave ? L"La contraseña no es correcta, así que no se pudo abrir."
+                                       : L"Hacía falta la contraseña y no se dio, así que no se extrajo.";
+            return;
+        case motor7z::Apertura::ClaveMala:
+            m_res.estado = Estado::ContrasenaIncorrecta;
+            m_res.mensaje = L"La contraseña no es correcta (o el archivo está dañado), así que no se pudo abrir.";
+            return;
+        case motor7z::Apertura::SinMemoria:
+            m_res.estado = Estado::Error;
+            m_res.mensaje = L"No alcanzó la memoria para abrir este archivo.";
+            return;
+        default:
+            if (!arc.NoAbrio().empty())
+            {
+                m_res.estado = varias ? Estado::FaltaParte : Estado::Error;
+                m_res.mensaje = L"No se pudo abrir «" + NombreDe(arc.NoAbrio()) + L"». ¿Se movió o se borró?";
+            }
+            else if (!arc.FaltaVolumen().empty())
+            {
+                m_res.estado = Estado::FaltaParte;
+                m_res.mensaje = MensajeFalta(arc.FaltaVolumen());
+            }
+            else if (arc.Incompleto())
+            {
+                m_res.estado = varias ? Estado::FaltaParte : Estado::Error;
+                m_res.mensaje = varias ? L"Falta la parte que va después de «" + NombreDe(m_partesCompletas.back()) +
+                                             L"». Revisa que se hayan bajado todas las partes y que estén en la misma carpeta."
+                                       : L"El archivo está incompleto: se acaba antes de tiempo. ¿Se terminó de bajar?";
+            }
+            else if (ap == motor7z::Apertura::NoEsArchivo)
+            {
+                m_res.estado = Estado::NoEsArchivo;
+                m_res.mensaje = L"No es un archivo comprimido que Jícaro conozca, o está dañado.";
+            }
+            else
+            {
+                m_res.estado = Estado::Error;
+                m_res.mensaje = L"El archivo está dañado o no se puede leer.";
+            }
+            return;
+        }
+        if (arc.ClaveUsada())
+        {
+            m_clave = arc.ClaveUsada();
+            m_dioClave = true;
+        }
+        ConEscritor([&](CarpetaDeTrabajo& trabajo, archive* w) { Bucle7z(arc, trabajo, w); });
+
+        // Falta una parte que según el archivo sigue (aunque nada haya fallado: lo que trae esa parte ni se ve), o algo se
+        // acabó antes de tiempo
+        if (m_res.estado == Estado::Bien && !m_cancelar && !m_parar && !m_detenido && !m_sinEspacio)
+        {
+            std::wstring falta = arc.FaltaVolumen();
+            if (!falta.empty())
+            {
+                m_res.estado = Estado::FaltaParte;
+                m_res.mensaje = MensajeFalta(falta);
+            }
+            else if (m_incompletos > 0 && m_res.archivos == 0)
+            {
+                m_res.estado = varias ? Estado::FaltaParte : Estado::Error;
+                m_res.mensaje = varias ? L"Falta la parte que va después de «" + NombreDe(m_partesCompletas.back()) +
+                                             L"». Revisa que se hayan bajado todas las partes y que estén en la misma carpeta."
+                                       : L"El archivo está incompleto: se acaba antes de tiempo. ¿Se terminó de bajar?";
+            }
+        }
+    }
     Resumen Extraccion::Ejecutar()
     {
         m_prog.Reiniciar();
@@ -1304,58 +1937,19 @@ namespace
         ComIniciado com;   // para la marca de la Web y la Papelera
         if (m_op.pasarMarca) m_zona = marca::ZonaDelJuego(m_partesCompletas, m_referente);
         m_res.zona = marca::HayQueMarcar(m_zona) ? m_zona : 0;
-
+        if (m_op.contrasena && !m_op.contrasena->empty())
         {
-            Lector lector(m_partesCompletas, m_prog, m_cancelar);
-            m_lector = &lector;
-            if (!lector.Abrir(&m_pr, m_soloSuelto))
-            {
-                Clasificar(lector, m_res.estado, m_res.mensaje);
-            }
-            else
-            {
-                CarpetaDeTrabajo trabajo(m_destino);
-                if (!trabajo.ok)
-                {
-                    m_res.mensaje = L"No se pudo usar la carpeta de destino (¿la ruta es muy larga?).";
-                }
-                else
-                {
-                    // Defensas de libarchive: sin rutas absolutas, sin «..», sin escribir a través de enlaces y sin
-                    // reemplazar nada (Jícaro pregunta antes y manda lo anterior a la Papelera)
-                    EscritorPropio w(archive_write_disk_new());
-                    archive_write_disk_set_options(w.get(), ARCHIVE_EXTRACT_TIME | ARCHIVE_EXTRACT_SECURE_SYMLINKS
-                                                                | ARCHIVE_EXTRACT_SECURE_NODOTDOT
-                                                                | ARCHIVE_EXTRACT_SECURE_NOABSOLUTEPATHS
-                                                                | ARCHIVE_EXTRACT_NO_OVERWRITE);
-                    m_res.estado = Estado::Bien;
-                    try
-                    {
-                        Bucle(lector, trabajo, w.get());
-                    }
-                    catch (...)
-                    {
-                        // Sin memoria u otra falla rara: se conserva lo que ya se sabe y se limpia el archivo en curso
-                        m_res.estado = Estado::Error;
-                        try
-                        {
-                            if (m_enCurso.activo)
-                            {
-                                archive_write_finish_entry(w.get());
-                                m_enCurso.activo = false;
-                                QuitarAMedias(m_enCurso.completa, m_enCurso.relativa, m_enCurso.id);
-                            }
-                            m_res.mensaje = L"No alcanzó la memoria, o algo salió mal, y la extracción se detuvo.";
-                        }
-                        catch (...)
-                        {
-                        }
-                    }
-                    // «w» se cierra aquí, todavía con la carpeta de trabajo puesta (fechas de las carpetas)
-                }
-            }
-            m_lector = nullptr;
+            m_clave = m_op.contrasena;
+            m_dioClave = true;
         }
+
+        // Los RAR y los 7z, con 7z.dll (si está junto al programa); lo demás, con libarchive
+        std::optional<motor7z::Formato> formato;
+        if (!m_soloSuelto && motor7z::Disponible()) formato = motor7z::Detectar(m_partesCompletas.front());
+        if (formato) Ejecutar7z(*formato);
+        else EjecutarLibarchive();
+        if (m_clave) BorrarTexto(*m_clave);
+        m_clave.reset();
 
         if (m_parar || (m_cancelar && m_res.estado == Estado::Bien))
         {
@@ -1374,7 +1968,7 @@ namespace
         }
         else if (m_res.estado == Estado::Bien && m_res.cifradas > 0)
         {
-            // Con contraseña de un tipo que libarchive no abre: se dice claro qué hacer
+            // Con contraseña de un tipo que Jícaro no abre: se dice claro qué hacer
             if (m_res.archivos == 0)
             {
                 m_res.estado = Estado::CifradoNoSoportado;
@@ -1383,15 +1977,40 @@ namespace
             else
             {
                 m_res.mensaje = L"Se extrajeron " + TextoNumero(m_res.archivos) + L" archivos, pero " +
-                    TextoNumero(m_res.cifradas) + L" tienen una contraseña de un tipo que Jícaro todavía no puede abrir. "
-                    L"Para esos usa otro programa, como 7-Zip o WinRAR.";
+                    TextoNumero(m_res.cifradas) + L" tienen una contraseña que Jícaro no pudo abrir (falta 7z.dll junto a "
+                    L"Jicaro.exe, o es un cifrado que no conoce).";
+            }
+        }
+        else if (m_res.estado == Estado::Bien && m_res.clavesMalas > 0)
+        {
+            if (m_res.archivos == 0)
+            {
+                m_res.estado = Estado::ContrasenaIncorrecta;
+                m_res.mensaje = L"La contraseña no es correcta, así que no se extrajo.";
+            }
+            else
+            {
+                m_res.mensaje = L"Se extrajeron " + TextoNumero(m_res.archivos) + L" archivos, pero " +
+                    TextoNumero(m_res.clavesMalas) + L" no salieron porque la contraseña no sirvió.";
+            }
+        }
+        else if (m_res.estado == Estado::Bien && m_res.sinClave > 0)
+        {
+            if (m_res.archivos == 0)
+            {
+                m_res.estado = Estado::SinContrasena;
+                m_res.mensaje = L"Hacía falta la contraseña y no se dio, así que no se extrajo.";
+            }
+            else
+            {
+                m_res.mensaje = L"Se extrajeron " + TextoNumero(m_res.archivos) + L" archivos, pero " +
+                    TextoNumero(m_res.sinClave) + L" tienen contraseña y no se dio.";
             }
         }
         if (m_res.mensaje.empty()) m_res.mensaje = TextoEstado(m_res.estado);
         return m_res;
     }
 }
-
 static jicaro::Contenido ListarAdentro(const std::vector<std::wstring>& partes, const std::wstring& nombreSuelto,
                                        jicaro::Progreso& progreso, const std::atomic<bool>& cancelar, bool soloSuelto)
 {
@@ -1484,16 +2103,154 @@ static jicaro::Contenido ListarAdentro(const std::vector<std::wstring>& partes, 
         }
     }
     c.formato = NombreFormato(l.a);
+    c.cifradoSoportado = Formato(l.a) == ARCHIVE_FORMAT_ZIP;
     if (c.completo || (c.mensaje.empty() && !c.entradas.empty())) c.estado = Estado::Bien;
     if (c.completo && c.entradas.empty() && c.mensaje.empty()) c.mensaje = L"El archivo está vacío.";
     return c;
 }
 
+// RAR y 7z con 7z.dll. Si la lista tiene contraseña, se prueba «clave» y después se pregunta; nunca se prueban claves
+// por cuenta propia.
+static jicaro::Contenido ListarCon7z(jicaro::motor7z::Formato formato, const std::vector<std::wstring>& completas,
+                                     jicaro::Progreso& progreso, const std::atomic<bool>& cancelar,
+                                     jicaro::Preguntas* preguntas, const std::optional<std::wstring>& clave)
+{
+    using namespace jicaro;
+    Contenido c;
+    c.cifradoSoportado = true;
+    motor7z::Archivo arc;
+    std::optional<std::wstring> actual = clave;
+    if (actual && actual->empty()) actual.reset();
+    bool dio = actual.has_value();
+    motor7z::Apertura ap = motor7z::Apertura::Error;
+    for (int intento = 0;; intento++)
+    {
+        const bool otraVez = intento > 0;
+        auto pedir = [&actual, &dio, preguntas, &cancelar, otraVez]() -> std::optional<std::wstring> {
+            if (!otraVez && actual) return actual;
+            if (!preguntas || !preguntas->contrasena || cancelar) return std::nullopt;
+            auto r = preguntas->contrasena(L"", otraVez);
+            if (!r || r->empty()) return std::nullopt;
+            dio = true;
+            actual = r;
+            return r;
+        };
+        ap = arc.Abrir(completas, formato, pedir, progreso, cancelar);
+        if (ap != motor7z::Apertura::ClaveMala) break;
+        if (actual) BorrarTexto(*actual);
+        actual.reset();
+        if (!preguntas || !preguntas->contrasena || cancelar) break;
+    }
+    if (actual) BorrarTexto(*actual);
+    c.formato = arc.NombreFormato();
+    const bool varias = completas.size() > 1;
+    switch (ap)
+    {
+    case motor7z::Apertura::Bien: break;
+    case motor7z::Apertura::Cancelado:
+        c.estado = Estado::Cancelado;
+        c.mensaje = L"Se canceló.";
+        return c;
+    case motor7z::Apertura::SinClave:
+        c.estado = dio ? Estado::ContrasenaIncorrecta : Estado::SinContrasena;
+        c.mensaje = dio ? L"La contraseña no es correcta: sin la buena no se puede ver qué trae este archivo."
+                        : L"Este archivo tiene contraseña hasta para ver qué trae. Ábrelo otra vez para escribirla.";
+        return c;
+    case motor7z::Apertura::ClaveMala:
+        c.estado = Estado::ContrasenaIncorrecta;
+        c.mensaje = L"La contraseña no es correcta (o el archivo está dañado): no se puede ver qué trae.";
+        return c;
+    case motor7z::Apertura::SinMemoria:
+        c.mensaje = L"No alcanzó la memoria para leer la lista de este archivo.";
+        return c;
+    default:
+        if (!arc.NoAbrio().empty())
+        {
+            c.estado = varias ? Estado::FaltaParte : Estado::Error;
+            c.mensaje = L"No se pudo abrir «" + NombreDe(arc.NoAbrio()) + L"». ¿Se movió o se borró?";
+        }
+        else if (!arc.FaltaVolumen().empty())
+        {
+            c.estado = Estado::FaltaParte;
+            c.faltan.push_back(arc.FaltaVolumen());
+            c.mensaje = MensajeFalta(arc.FaltaVolumen());
+        }
+        else if (arc.Incompleto())
+        {
+            c.estado = varias ? Estado::FaltaParte : Estado::Error;
+            c.mensaje = varias ? L"Falta la parte que va después de «" + NombreDe(completas.back()) +
+                                     L"». Revisa que se hayan bajado todas las partes y que estén en la misma carpeta."
+                               : L"El archivo está incompleto: se acaba antes de tiempo. ¿Se terminó de bajar?";
+        }
+        else if (ap == motor7z::Apertura::NoEsArchivo)
+        {
+            c.estado = Estado::NoEsArchivo;
+            c.mensaje = L"No es un archivo comprimido que Jícaro conozca, o está dañado.";
+        }
+        else
+        {
+            c.estado = Estado::Error;
+            c.mensaje = L"El archivo está dañado o no se puede leer.";
+        }
+        return c;
+    }
+    if (arc.PidioClave() && arc.ClaveUsada()) c.clave = *arc.ClaveUsada();
+
+    size_t letras = 0;
+    for (const auto& it : arc.Items())
+    {
+        Entrada en;
+        en.ruta = it.ruta;
+        en.carpeta = it.carpeta;
+        en.enlace = it.simbolico;
+        en.especial = it.alterno || it.especial || it.anti;
+        en.cifrada = it.cifrada;
+        en.tamano = en.carpeta ? -1 : it.tamano;
+        int64_t s = 0;
+        long ns = 0;
+        if (it.conMTime && AUnix(it.mtime, s, ns) && s > 0) en.fecha = s;
+        if (en.carpeta && (en.ruta.empty() || en.ruta == L".")) continue;
+        if (en.tamano > 0 && !en.enlace && !en.especial) c.total += en.tamano;
+        if (en.cifrada && !en.carpeta) c.cifradas++;
+        letras += en.ruta.size();
+        c.entradas.push_back(std::move(en));
+        // Topes para la memoria: con más que esto, la lista se muestra a medias (extraer todo sigue funcionando)
+        if (c.entradas.size() >= 1000000 || letras >= (64u << 20))
+        {
+            c.estado = Estado::Bien;
+            c.mensaje = L"El archivo trae demasiados archivos para mostrarlos todos: la lista está a medias. «Extraer todo» funciona igual.";
+            return c;
+        }
+    }
+    progreso.archivos = (int64_t)c.entradas.size();
+    c.completo = true;
+    c.estado = Estado::Bien;
+    if (!arc.FaltaVolumen().empty())
+    {
+        c.faltan.push_back(arc.FaltaVolumen());
+        c.mensaje = MensajeFalta(arc.FaltaVolumen());
+    }
+    else if (arc.Incompleto())
+        c.mensaje = L"El archivo parece incompleto (¿se terminó de bajar?): puede que no salga todo.";
+    else if (c.entradas.empty())
+        c.mensaje = L"El archivo está vacío.";
+    return c;
+}
+
 jicaro::Contenido jicaro::Listar(const std::vector<std::wstring>& partes, const std::wstring& nombreSuelto,
-                                 Progreso& progreso, const std::atomic<bool>& cancelar)
+                                 Progreso& progreso, const std::atomic<bool>& cancelar, Preguntas* preguntas,
+                                 const std::optional<std::wstring>& clave)
 {
     try
     {
+        // Los RAR y los 7z, con 7z.dll (si está junto al programa)
+        if (!partes.empty() && motor7z::Disponible())
+        {
+            std::vector<std::wstring> completas;
+            for (auto& p : partes) completas.push_back(RutaCompleta(p));
+            progreso.Reiniciar();
+            if (auto f = motor7z::Detectar(completas.front())) return ListarCon7z(*f, completas, progreso, cancelar, preguntas, clave);
+        }
         Contenido c = ListarAdentro(partes, nombreSuelto, progreso, cancelar, false);
         // Un .gz de un archivo que empieza con ceros parece un TAR vacío: si el nombre no dice TAR, se lee como suelto
         if (c.completo && c.entradas.empty() && c.formato.rfind(L"TAR + ", 0) == 0 && !nombreSuelto.empty()
@@ -1554,6 +2311,7 @@ std::wstring jicaro::TextoEstado(Estado estado)
     case Estado::FaltaParte: return L"Falta una parte del archivo.";
     case Estado::CifradoNoSoportado: return L"Este archivo tiene un tipo de contraseña que Jícaro todavía no puede abrir.";
     case Estado::SinContrasena: return L"Hace falta la contraseña.";
+    case Estado::ContrasenaIncorrecta: return L"La contraseña no es correcta.";
     case Estado::NoEsArchivo: return L"No es un archivo comprimido que Jícaro conozca, o está dañado.";
     case Estado::SinEspacio: return L"No queda espacio suficiente en el disco.";
     case Estado::Detenido: return L"Se detuvo para no llenar el disco.";
