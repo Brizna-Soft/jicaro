@@ -10,8 +10,8 @@
 #   7z2605-src.7z     el código fuente de esa misma versión (la LGPL pide ofrecerlo junto a la DLL)
 #
 # Las descargas son las que enlaza https://www.7-zip.org/download.html (el sitio oficial; desde 2026 sus archivos están
-# en el GitHub oficial de 7-Zip, github.com/ip7z/7zip). Las huellas coinciden con las que publica esa versión. Si una
-# no coincide, se detiene y no usa nada.
+# en el GitHub oficial de 7-Zip, github.com/ip7z/7zip, y www.7-zip.org/a/ lleva ahí). Las huellas coinciden con las que
+# publica esa versión. Si una no coincide, se detiene y no usa nada.
 param([string]$Destino = (Join-Path $PSScriptRoot 'build\7zip'))
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
@@ -19,13 +19,13 @@ $ProgressPreference = 'SilentlyContinue'
 $version = '26.05'
 $archivos = @(
     # El instalador para Windows de 64 bits: de aquí sale 7z.dll (no se ejecuta, solo se abre como archivo comprimido)
-    @{ Nombre = '7z2605-x64.exe'; Url = 'https://www.7-zip.org/a/7z2605-x64.exe';
+    @{ Nombre = '7z2605-x64.exe'; Url = @('https://www.7-zip.org/a/7z2605-x64.exe', 'https://github.com/ip7z/7zip/releases/download/26.05/7z2605-x64.exe');
        Sha256 = 'fd99e86f57d8f429ef5ed045bf98315af962e2309b0f1ba87a147a44c71647d0' },
     # 7-Zip de consola (7zr.exe), solo para sacar 7z.dll del instalador y los textos del código fuente
-    @{ Nombre = '7zr-2605.exe'; Url = 'https://github.com/ip7z/7zip/releases/download/26.05/7zr.exe';
+    @{ Nombre = '7zr-2605.exe'; Url = @('https://github.com/ip7z/7zip/releases/download/26.05/7zr.exe');
        Sha256 = '9bf582b894dfa665f852d7e9112b02290a1c303c2d95a21fcdc41ffcb03143b7' },
     # El código fuente de la misma versión
-    @{ Nombre = '7z2605-src.7z'; Url = 'https://github.com/ip7z/7zip/releases/download/26.05/7z2605-src.7z';
+    @{ Nombre = '7z2605-src.7z'; Url = @('https://github.com/ip7z/7zip/releases/download/26.05/7z2605-src.7z');
        Sha256 = 'fa081a1a33186158d71e9e24f494ed852ef8d0c9d06e21a86fb4713d94b55ae9' }
 )
 $huellaDll = '78bf6b668d75801e3aa180b4ccb16e6d8395fba80dec8a065055bb6f8dfabb82'   # 7z.dll 26.05 de 64 bits
@@ -39,9 +39,25 @@ $rutas = @{}
 foreach ($a in $archivos) {
     $ruta = Join-Path $cache $a.Nombre
     if (-not (Test-Path -LiteralPath $ruta) -or (Huella $ruta) -ne $a.Sha256) {
-        Write-Host "Bajando $($a.Nombre) de $($a.Url)"
+        # Cada dirección oficial, con un segundo intento si la red falla un momento
         $parcial = "$ruta.parcial"
-        Invoke-WebRequest -UseBasicParsing -Uri $a.Url -OutFile $parcial
+        $bajo = $false
+        foreach ($url in $a.Url) {
+            foreach ($intento in 1, 2) {
+                try {
+                    Write-Host "Bajando $($a.Nombre) de $url"
+                    Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $parcial
+                    $bajo = $true
+                    break
+                }
+                catch {
+                    Write-Host "  no se pudo ($($_.Exception.Message))"
+                    Start-Sleep -Seconds 3
+                }
+            }
+            if ($bajo) { break }
+        }
+        if (-not $bajo) { throw "No se pudo bajar $($a.Nombre) de ninguna dirección oficial" }
         $h = Huella $parcial
         if ($h -ne $a.Sha256) {
             Remove-Item -LiteralPath $parcial -Force
