@@ -1683,6 +1683,29 @@ namespace
             std::wstring que;
             Revisar(juego.tipo == volumenes::Tipo::Uno && juego.faltan.empty() && r.estado == jicaro::Estado::Bien && Coincide(d, Esperado(), que),
                     L"un ZIP común con una .z02 ajena al lado se abre igual " + Texto(r) + L" " + que);
+            // Un registro final falso escondido en el comentario («parte 1 de 2», o «parte 1» con la lista en la 0): no engaña
+            {
+                std::string z;
+                LeerTodo(trabajo + L"\\propios\\propio.zip", z);
+                size_t fin = z.rfind(std::string("PK\x05\x06", 4));
+                std::string falso1 = std::string("PK\x05\x06", 4) + std::string("\x01\x00\x02\x00", 4) + std::string(14, '\0');
+                std::string falso2 = std::string("PK\x05\x06", 4) + std::string("\x01\x00\x00\x00\x01\x00\x01\x00\x0A\x00\x00\x00\x00\x00\x00\x00", 16) +
+                                     std::string(2, '\0');
+                for (int k = 0; k < 2; k++)
+                {
+                    std::string comentario = std::string("un comentario ") + (k == 0 ? falso1 : falso2);
+                    std::string conFalso = z.substr(0, fin + 20);
+                    conFalso += (char)(comentario.size() & 0xFF);
+                    conFalso += (char)(comentario.size() >> 8);
+                    conFalso += comentario;
+                    std::wstring nombre = a + L"\\trampa" + std::to_wstring(k) + L".zip";
+                    EscribirTodo(nombre, conFalso);
+                    EscribirTodo(a + L"\\trampa" + std::to_wstring(k) + L".z01", "ajena");
+                    auto jt = volumenes::Buscar(nombre);
+                    Revisar(jt.tipo == volumenes::Tipo::Uno && jt.faltan.empty(),
+                            L"un ZIP común con un registro final falso en su comentario no se toma por partido (" + std::to_wstring(k + 1) + L")");
+                }
+            }
             // Solo el .zip de un ZIP en partes: su registro final dice cuántas partes faltan
             std::wstring s = Carpeta(L"zip-solo-final");
             CopyFileW((c + L"\\partido.zip").c_str(), (s + L"\\final.zip").c_str(), FALSE);

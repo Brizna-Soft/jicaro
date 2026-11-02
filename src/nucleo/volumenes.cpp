@@ -63,6 +63,10 @@ namespace
 
     // ¿En cuántas partes se cortó este ZIP? Lo dice el registro final del ZIP (el número de la parte que lo trae; en un
     // ZIP64, el total de partes). 0: es un ZIP de una sola parte; -1: no se pudo leer (no parece un ZIP).
+    //
+    // El comentario del ZIP puede traer algo con la misma forma que el registro final: por eso cada candidato se
+    // comprueba (partes coherentes y, si la lista empieza en este archivo, que de verdad esté ahí) y, ante uno que no
+    // se puede comprobar, se prefiere uno anterior que sí.
     int UltimaParteDelZip(const std::wstring& ruta)
     {
         HANDLE h = CreateFileW(jicaro::rutas::Larga(ruta).c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
@@ -74,33 +78,64 @@ namespace
         {
             // El registro final (22 bytes y un comentario de hasta 65535) está al final; antes puede ir el de ZIP64 (20)
             const int64_t leer = std::min<int64_t>(tam.QuadPart, 22 + 65535 + 20);
+            const int64_t inicioBufer = tam.QuadPart - leer;
             std::vector<unsigned char> b((size_t)leer);
             LARGE_INTEGER desde;
-            desde.QuadPart = tam.QuadPart - leer;
+            desde.QuadPart = inicioBufer;
             DWORD n = 0;
             if (SetFilePointerEx(h, desde, nullptr, FILE_BEGIN) && ReadFile(h, b.data(), (DWORD)leer, &n, nullptr) && n == (DWORD)leer)
             {
                 auto l16 = [&](size_t p) { return (uint32_t)b[p] | ((uint32_t)b[p + 1] << 8); };
                 auto l32 = [&](size_t p) { return l16(p) | (l16(p + 2) << 16); };
+                // ¿Empieza la lista (el directorio central) en esta posición del archivo?
+                auto hayLista = [&](int64_t pos) {
+                    unsigned char f[4] = {};
+                    LARGE_INTEGER p;
+                    p.QuadPart = pos;
+                    DWORD leidos = 0;
+                    return SetFilePointerEx(h, p, nullptr, FILE_BEGIN) && ReadFile(h, f, 4, &leidos, nullptr) && leidos == 4
+                        && f[0] == 'P' && f[1] == 'K' && f[2] == 1 && f[3] == 2;
+                };
+                int sinComprobar = -1;   // un candidato aceptable que no se pudo comprobar del todo
                 for (size_t p = b.size() - 22 + 1; p-- > 0;)
                 {
                     if (b[p] != 'P' || b[p + 1] != 'K' || b[p + 2] != 5 || b[p + 3] != 6) continue;
                     if (p + 22 + l16(p + 20) != b.size()) continue;   // el comentario tiene que llegar justo al final
-                    uint32_t estaParte = l16(p + 4);
-                    if (estaParte == 0xFFFF && p >= 20 && b[p - 20] == 'P' && b[p - 19] == 'K' && b[p - 18] == 6 && b[p - 17] == 7)
+                    const uint32_t estaParte = l16(p + 4), parteLista = l16(p + 6), enEsta = l16(p + 8), total = l16(p + 10);
+                    const uint32_t tamLista = l32(p + 12), posLista = l32(p + 16);
+                    if (estaParte == 0xFFFF || parteLista == 0xFFFF || posLista == 0xFFFFFFFF)
                     {
-                        uint32_t total = l32(p - 20 + 16);   // ZIP64: el total de partes
-                        r = total >= 1 && total <= 100000 ? (int)total - 1 : -1;
+                        // ZIP64: el localizador de 20 bytes va justo antes y trae el total de partes
+                        if (p < 20 || b[p - 20] != 'P' || b[p - 19] != 'K' || b[p - 18] != 6 || b[p - 17] != 7) continue;
+                        const uint32_t partes = l32(p - 20 + 16);
+                        if (partes < 1 || partes > 100000) continue;
+                        r = (int)partes - 1;
+                        break;
                     }
-                    else r = estaParte <= 100000 ? (int)estaParte : -1;
-                    break;
+                    if (parteLista > estaParte || enEsta > total || estaParte > 100000) continue;
+                    if (parteLista == estaParte)
+                    {
+                        // La lista empieza en este archivo: tiene que estar antes del registro final y empezar con su firma
+                        const int64_t posRegistro = inicioBufer + (int64_t)p;
+                        if (total == 0)
+                        {
+                            if (estaParte != 0) continue;
+                            r = 0;
+                            break;
+                        }
+                        if ((int64_t)posLista + (int64_t)tamLista > posRegistro || !hayLista(posLista)) continue;
+                        r = (int)estaParte;
+                        break;
+                    }
+                    // La lista empieza en una parte anterior: no se puede comprobar aquí; se prefiere uno anterior que sí
+                    if (sinComprobar < 0 && total > 0 && tamLista > 0) sinComprobar = (int)estaParte;
                 }
+                if (r < 0) r = sinComprobar;
             }
         }
         CloseHandle(h);
         return r;
     }
-
     // Parte vieja número k: 0 = .rar, 1 = .r00, ... 100 = .r99, 101 = .s00 ...
     std::wstring ExtensionVieja(int k)
     {
