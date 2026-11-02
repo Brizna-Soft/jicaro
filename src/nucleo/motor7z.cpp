@@ -846,8 +846,8 @@ namespace jicaro::motor7z
     namespace
     {
         // Mientras 7z.dll lee la lista de un archivo, el proceso tiene un tope de memoria (un «Job» de Windows): una
-        // lista comprimida enorme (una trampa) falla en vez de llenar la memoria de la PC. Los programas que Jícaro abra
-        // no quedan dentro. Si Windows no deja poner el tope, se sigue sin él.
+        // lista comprimida enorme (una trampa) falla en vez de llenar la memoria de la PC, y así tampoco tarda mucho.
+        // Los programas que Jícaro abra no quedan dentro. Sin el tope no se abre nada con 7z.dll.
         HANDLE TrabajoDeMemoria()
         {
             static HANDLE job = []() -> HANDLE {
@@ -866,27 +866,29 @@ namespace jicaro::motor7z
             return job;
         }
 
-        void PonerTope(uint64_t bytes)
+        bool PonerTope(uint64_t bytes)
         {
             HANDLE j = TrabajoDeMemoria();
-            if (!j) return;
+            if (!j) return false;
             JOBOBJECT_EXTENDED_LIMIT_INFORMATION l{};
             l.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK | (bytes ? JOB_OBJECT_LIMIT_PROCESS_MEMORY : 0);
             l.ProcessMemoryLimit = (SIZE_T)bytes;
-            SetInformationJobObject(j, JobObjectExtendedLimitInformation, &l, sizeof(l));
+            return SetInformationJobObject(j, JobObjectExtendedLimitInformation, &l, sizeof(l)) != FALSE;
         }
 
         struct TopeAlAbrir
         {
+            bool puesto = false;
             TopeAlAbrir()
             {
                 PROCESS_MEMORY_COUNTERS_EX m{};
-                uint64_t usada = 0;
-                if (GetProcessMemoryInfo(GetCurrentProcess(), reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&m), sizeof(m)))
-                    usada = m.PrivateUsage;
-                PonerTope(usada + (2ULL << 30));   // 2 GB más de lo que ya usa: de sobra para una lista de verdad
+                if (!GetProcessMemoryInfo(GetCurrentProcess(), reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&m), sizeof(m))) return;
+                puesto = PonerTope((uint64_t)m.PrivateUsage + (2ULL << 30));   // 2 GB más de lo que ya usa: de sobra para una lista de verdad
             }
-            ~TopeAlAbrir() { PonerTope(0); }
+            ~TopeAlAbrir()
+            {
+                if (puesto) PonerTope(0);
+            }
             TopeAlAbrir(const TopeAlAbrir&) = delete;
             TopeAlAbrir& operator=(const TopeAlAbrir&) = delete;
         };
@@ -1096,11 +1098,14 @@ namespace jicaro::motor7z
         }
         Ptr<AlAbrir> cb(new AlAbrir(partes, porVolumenes, std::move(clave), &progreso, &cancelar));
         const UInt64 soloAlPrincipio = 0;   // la firma ya se vio al principio: no se busca más adentro
-        HRESULT hr = E_FAIL;
+        // El tope de memoria dura mientras se abre y se lee la lista; sin él no se abre
+        TopeAlAbrir tope;
+        if (!tope.puesto)
         {
-            TopeAlAbrir tope;
-            hr = m->arc->Open(flujo.get(), &soloAlPrincipio, cb.get());
+            m->arc.Soltar();
+            return Apertura::SinTope;
         }
+        HRESULT hr = m->arc->Open(flujo.get(), &soloAlPrincipio, cb.get());
         m->volumenes = porVolumenes ? std::vector<std::wstring>{ partes.front() } : partes;
         for (auto& u : cb->Usadas()) m->volumenes.push_back(u);
         m->pidioClave = cb->Pidio();

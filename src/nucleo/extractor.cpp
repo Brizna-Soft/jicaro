@@ -591,6 +591,107 @@ namespace
         bool Valido() const { return h != INVALID_HANDLE_VALUE; }
     };
 
+    // Un archivo que crea Jícaro: con CREATE_NEW (nunca abre algo que ya estaba, ni algo que otro programa cree justo en
+    // ese momento) y con su propio manejador, para saber que es el suyo y poder quitarlo sin depender de la ruta. Si se
+    // destruye sin cerrarlo (por ejemplo, por una excepción), se quita.
+    class ArchivoPropio
+    {
+    public:
+        ArchivoPropio() = default;
+        ~ArchivoPropio()
+        {
+            if (h != INVALID_HANDLE_VALUE) Quitar();
+        }
+        ArchivoPropio(const ArchivoPropio&) = delete;
+        ArchivoPropio& operator=(const ArchivoPropio&) = delete;
+
+        // 0 si se creó; si no, el error de Windows (ERROR_FILE_EXISTS: ya hay algo con ese nombre)
+        DWORD Crear(const std::wstring& completa)
+        {
+            h = CreateFileW(rutas::Larga(completa).c_str(), GENERIC_WRITE | DELETE, 0, nullptr, CREATE_NEW,
+                            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
+            if (h == INVALID_HANDLE_VALUE)
+            {
+                DWORD e = GetLastError();
+                return e ? e : ERROR_CANNOT_MAKE;
+            }
+            id = IdentidadDe(h);
+            pos = 0;
+            return 0;
+        }
+
+        // Escribe en la posición «desde» (si hay un hueco antes, queda con ceros, como hace libarchive)
+        bool Escribir(const void* datos, size_t tamano, int64_t desde)
+        {
+            if (desde != pos)
+            {
+                LARGE_INTEGER p;
+                p.QuadPart = desde;
+                if (!SetFilePointerEx(h, p, nullptr, FILE_BEGIN)) return false;
+                pos = desde;
+            }
+            const char* d = static_cast<const char*>(datos);
+            size_t quedan = tamano;
+            while (quedan > 0)
+            {
+                DWORD escritos = 0;
+                if (!WriteFile(h, d, (DWORD)std::min<size_t>(quedan, 1u << 30), &escritos, nullptr) || escritos == 0) return false;
+                d += escritos;
+                quedan -= escritos;
+                pos += escritos;
+            }
+            return true;
+        }
+
+        // El hueco del final de un archivo con huecos: el archivo crece hasta su tamaño
+        bool Agrandar(int64_t tamano)
+        {
+            LARGE_INTEGER p;
+            p.QuadPart = tamano;
+            return SetFilePointerEx(h, p, nullptr, FILE_BEGIN) && SetEndOfFile(h);
+        }
+
+        // Pone las fechas y cierra. false si Windows no pudo cerrarlo bien (entonces se quita).
+        bool Terminar(const FILETIME* creado, const FILETIME* acceso, const FILETIME* escrito)
+        {
+            if (creado || acceso || escrito) SetFileTime(h, creado, acceso, escrito);
+            bool ok = CloseHandle(h) != FALSE;
+            h = INVALID_HANDLE_VALUE;
+            return ok;
+        }
+
+        // Lo borra por su manejador. true si se borró.
+        bool Quitar()
+        {
+            if (h == INVALID_HANDLE_VALUE) return false;
+            FILE_DISPOSITION_INFO borrar = {};
+            borrar.DeleteFile = TRUE;
+            bool borrado = SetFileInformationByHandle(h, FileDispositionInfo, &borrar, sizeof(borrar)) != FALSE;
+            CloseHandle(h);
+            h = INVALID_HANDLE_VALUE;
+            return borrado;
+        }
+
+        bool Abierto() const { return h != INVALID_HANDLE_VALUE; }
+
+        Identidad id;
+
+    private:
+        HANDLE h = INVALID_HANDLE_VALUE;
+        int64_t pos = 0;
+    };
+
+    // Segundos y nanosegundos desde 1970 a FILETIME (cada 100 ns desde 1601)
+    bool AFiletime(int64_t segundos, long nano, FILETIME& f)
+    {
+        if (segundos < -11644473600LL || segundos > 900000000000LL) return false;
+        int64_t v = segundos * 10000000 + nano / 100 + 116444736000000000LL;
+        if (v < 0) return false;
+        f.dwLowDateTime = (DWORD)(uint64_t)v;
+        f.dwHighDateTime = (DWORD)((uint64_t)v >> 32);
+        return true;
+    }
+
     struct LiberarEntrada
     {
         void operator()(archive_entry* e) const { archive_entry_free(e); }
@@ -672,7 +773,12 @@ namespace
         void Marcar(const std::wstring& completa, const std::wstring& relativa);
         bool Controlar(int64_t nuevos);
         bool ControlarAntes(int64_t anunciado);
-        bool CopiarDatos(archive* w, archive_entry* e, const std::wstring& cruda, bool& fatal, bool& incompleto);
+        bool CopiarDatos(ArchivoPropio& destino, archive_entry* e, const std::wstring& cruda, bool& fatal, bool& incompleto);
+        // Crea el archivo (y las carpetas de arriba que falten) con la revisión de todo el camino. false: no se creó
+        // (ya se dijo por qué).
+        bool CrearPropio(ArchivoPropio& f, const std::wstring& completa, const std::wstring& relativa, const std::wstring& cruda);
+        // Quita lo que quedó a medias: por su manejador; si Windows no deja, como QuitarAMedias
+        void QuitarPropio(ArchivoPropio& f, const std::wstring& completa, const std::wstring& relativa);
         bool CopiarEnlace(const Hecho& origen, const std::wstring& relativa, const std::wstring& cruda);
         void QuitarAMedias(const std::wstring& completa, const std::wstring& relativa, const Identidad& id);
 
@@ -964,7 +1070,35 @@ namespace
     // Cuenta para los topes lo que crece el archivo (datos y huecos, también el hueco final que libarchive agrega al
     // cerrarlo). «incompleto»: los datos se acabaron antes del tamaño que dice el archivo (pasa, por ejemplo, con un
     // RAR 5 en partes al que le falta la última: libarchive no lo marca como error).
-    bool Extraccion::CopiarDatos(archive* w, archive_entry* e, const std::wstring& cruda, bool& fatal, bool& incompleto)
+    bool Extraccion::CrearPropio(ArchivoPropio& f, const std::wstring& completa, const std::wstring& relativa, const std::wstring& cruda)
+    {
+        std::wstring carpeta = CarpetaDe(completa);
+        if (!SigueSeguro(relativa) || (!ExisteCarpeta(carpeta) && !CrearCarpetas(carpeta)) || !SigueSeguro(relativa))
+        {
+            Omitir(cruda, L"la carpeta cambió mientras se extraía; no se tocó");
+            return false;
+        }
+        DWORD e = f.Crear(completa);
+        if (e == 0) return true;
+        Omitir(cruda,
+               (e == ERROR_FILE_EXISTS || e == ERROR_ALREADY_EXISTS) ? L"apareció otro archivo con ese nombre mientras se extraía; no se tocó"
+                                                                     : L"no se pudo crear el archivo",
+               Tipo::Falla);
+        return false;
+    }
+
+    void Extraccion::QuitarPropio(ArchivoPropio& f, const std::wstring& completa, const std::wstring& relativa)
+    {
+        Identidad id = f.id;
+        if (f.Quitar())
+        {
+            if (m_cancelar || m_detenido || m_sinEspacio) m_res.quitoAMedias = true;
+            return;
+        }
+        QuitarAMedias(completa, relativa, id);
+    }
+
+    bool Extraccion::CopiarDatos(ArchivoPropio& destino, archive_entry* e, const std::wstring& cruda, bool& fatal, bool& incompleto)
     {
         archive* a = m_lector->a;
         const bool conTamano = archive_entry_size_is_set(e) && archive_entry_sparse_count(e) == 0;
@@ -989,8 +1123,16 @@ namespace
                     incompleto = true;
                     return false;
                 }
-                // El hueco del final también ocupa: libarchive agranda el archivo al tamaño anunciado al cerrarlo
-                if (logico > hasta && !Controlar(logico - hasta)) return false;
+                // El hueco del final también ocupa: el archivo crece hasta el tamaño anunciado (contado en los topes)
+                if (logico > hasta)
+                {
+                    if (!Controlar(logico - hasta)) return false;
+                    if (!destino.Agrandar(logico))
+                    {
+                        Omitir(cruda, L"no se pudo escribir en el disco", Tipo::Falla);
+                        return false;
+                    }
+                }
                 return true;
             }
             if (r < ARCHIVE_WARN)
@@ -1004,7 +1146,7 @@ namespace
             int64_t nuevoHasta = std::max<int64_t>(hasta, desde + (int64_t)tam);
             int64_t crecimiento = nuevoHasta - hasta;   // datos y el hueco que haya antes de ellos
             hasta = nuevoHasta;
-            if (archive_write_data_block(w, bloque, tam, desde) < ARCHIVE_OK)
+            if (!destino.Escribir(bloque, tam, desde))
             {
                 int64_t libre = EspacioLibre(m_destino);
                 if (libre >= 0 && libre < (64LL << 20)) m_sinEspacio = true;
@@ -1259,39 +1401,25 @@ namespace
                 continue;
             }
 
-            // Los datos del archivo en curso se guardan antes de crearlo (si falta memoria, que sea antes y no después)
-            m_enCurso.activo = false;
-            m_enCurso.completa = completa;
-            m_enCurso.relativa = *relativa;
-            EntradaPropia s(archive_entry_new());
-            archive_entry_copy_pathname_w(s.get(), relativa->c_str());
-            archive_entry_set_filetype(s.get(), AE_IFREG);
-            archive_entry_set_perm(s.get(), 0644);
-            if (archive_entry_size_is_set(e)) archive_entry_set_size(s.get(), archive_entry_size(e));
-            CopiarFechas(e, s.get());
-            if (archive_write_header(w, s.get()) < ARCHIVE_WARN)
-            {
-                Omitir(cruda, L"no se pudo crear el archivo", Tipo::Falla);
-                archive_write_finish_entry(w);
-                continue;
-            }
-            // libarchive crea el archivo y lo tiene abierto sin compartir. Si no (porque justo apareció otro con ese
-            // nombre), libarchive lo deja como estaba: Jícaro tampoco lo toca.
-            if (!AbiertoSinCompartir(completa))
-            {
-                archive_write_finish_entry(w);
-                Omitir(cruda, L"apareció otro archivo con ese nombre mientras se extraía; no se tocó", Tipo::Falla);
-                continue;
-            }
-            m_enCurso.id = IdentidadDe(completa);
-            m_enCurso.activo = true;
+            // Jícaro crea el archivo con CREATE_NEW y su propio manejador: nunca toca algo que no creó, y si algo falla lo
+            // quita por ese manejador (si una excepción corta todo, lo quita el destructor)
+            ArchivoPropio nuevo;
+            if (!CrearPropio(nuevo, completa, *relativa, cruda)) continue;
             bool fatal = false, incompleto = false;
-            bool completo = CopiarDatos(w, e, cruda, fatal, incompleto);
-            int fin = archive_write_finish_entry(w);
-            if (!completo || fin < ARCHIVE_WARN)
+            bool completo = CopiarDatos(nuevo, e, cruda, fatal, incompleto);
+            bool cerrado = false;
+            if (completo)
             {
-                m_enCurso.activo = false;
-                QuitarAMedias(completa, *relativa, m_enCurso.id);
+                FILETIME creado{}, acceso{}, escrito{};
+                bool hayC = archive_entry_birthtime_is_set(e) && AFiletime(archive_entry_birthtime(e), archive_entry_birthtime_nsec(e), creado);
+                bool hayA = archive_entry_atime_is_set(e) && AFiletime(archive_entry_atime(e), archive_entry_atime_nsec(e), acceso);
+                bool hayM = archive_entry_mtime_is_set(e) && AFiletime(archive_entry_mtime(e), archive_entry_mtime_nsec(e), escrito);
+                cerrado = nuevo.Terminar(hayC ? &creado : nullptr, hayA ? &acceso : nullptr, hayM ? &escrito : nullptr);
+            }
+            if (!completo || !cerrado)
+            {
+                if (nuevo.Abierto()) QuitarPropio(nuevo, completa, *relativa);
+                else QuitarAMedias(completa, *relativa, nuevo.id);
                 if (m_cancelar || m_detenido || m_sinEspacio) break;
                 if (fatal)
                 {
@@ -1312,10 +1440,9 @@ namespace
                 if (completo) Omitir(cruda, L"no se pudo terminar de escribir", Tipo::Falla);
                 continue;
             }
-            m_enCurso.activo = false;
             m_res.archivos++;
             m_prog.archivos++;
-            m_hechos[cruda] = { completa, m_enCurso.id };
+            m_hechos[cruda] = { completa, nuevo.id };
             Marcar(completa, *relativa);
         }
     }
@@ -1429,6 +1556,12 @@ namespace
         if (it.conCTime && AUnix(it.ctime, s, ns)) archive_entry_set_birthtime(e, (time_t)s, ns);
     }
 
+    std::wstring MensajeSinTope()
+    {
+        return L"Windows no dejó poner el tope de memoria con el que Jícaro abre los RAR y los 7z de forma segura, así que no se "
+               L"abrió. Cierra otros programas y vuelve a intentarlo.";
+    }
+
     std::wstring MensajeFalta(const std::wstring& parte)
     {
         return L"Falta la parte «" + parte + L"». Revisa que se hayan bajado todas las partes y que estén en la misma carpeta.";
@@ -1491,32 +1624,11 @@ namespace
                 x.m_res.mensaje = L"Algo cambió la carpeta de trabajo en medio de la extracción; se detuvo por seguridad.";
                 return motor7z::Paso::Parar;
             }
-            // Las carpetas de arriba que falten, con la revisión de todo el camino antes y después de crearlas
-            std::wstring carpeta = CarpetaDe(completa);
-            if (!x.SigueSeguro(*relativa) || (!ExisteCarpeta(carpeta) && !CrearCarpetas(carpeta)) || !x.SigueSeguro(*relativa))
-            {
-                x.Omitir(m_cruda, L"la carpeta cambió mientras se extraía; no se tocó");
-                return motor7z::Paso::Saltar;
-            }
-            // Jícaro crea el archivo: con CREATE_NEW nunca toca algo que ya estaba (ni algo que otro programa cree justo
-            // ahora), y con su propio manejador sabe que es el suyo y puede quitarlo sin depender de la ruta
-            HANDLE h = CreateFileW(rutas::Larga(completa).c_str(), GENERIC_WRITE | DELETE, 0, nullptr, CREATE_NEW,
-                                   FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
-            if (h == INVALID_HANDLE_VALUE)
-            {
-                DWORD e = GetLastError();
-                x.Omitir(m_cruda,
-                         (e == ERROR_FILE_EXISTS || e == ERROR_ALREADY_EXISTS)
-                             ? L"apareció otro archivo con ese nombre mientras se extraía; no se tocó"
-                             : L"no se pudo crear el archivo",
-                         Tipo::Falla);
-                return motor7z::Paso::Saltar;
-            }
-            m_h = h;
+            // Jícaro crea el archivo (CREATE_NEW y su propio manejador): nunca toca algo que no creó
+            if (!x.CrearPropio(m_archivo, completa, *relativa, m_cruda)) return motor7z::Paso::Saltar;
             m_activo = true;
             m_completa = completa;
             m_relativa = *relativa;
-            m_id = IdentidadDe(h);
             m_escrito = 0;
             m_fallaEscritura = false;
             return motor7z::Paso::Escribir;
@@ -1527,24 +1639,16 @@ namespace
             if (!m_activo) return true;
             if (x.m_cancelar) return false;
             if (m_fallaEscritura) return true;   // lo que falta de este archivo se descarta
-            const char* p = static_cast<const char*>(datos);
-            size_t quedan = tamano;
-            while (quedan > 0)
+            if (!m_archivo.Escribir(datos, tamano, m_escrito))
             {
-                DWORD escritos = 0;
-                if (!WriteFile(m_h, p, (DWORD)std::min<size_t>(quedan, 1u << 30), &escritos, nullptr) || escritos == 0)
+                int64_t libre = EspacioLibre(x.m_destino);
+                if (libre >= 0 && libre < (64LL << 20))
                 {
-                    int64_t libre = EspacioLibre(x.m_destino);
-                    if (libre >= 0 && libre < (64LL << 20))
-                    {
-                        x.m_sinEspacio = true;
-                        return false;
-                    }
-                    m_fallaEscritura = true;
-                    return true;
+                    x.m_sinEspacio = true;
+                    return false;
                 }
-                p += escritos;
-                quedan -= escritos;
+                m_fallaEscritura = true;
+                return true;
             }
             m_escrito += (int64_t)tamano;
             return x.Controlar((int64_t)tamano);
@@ -1558,13 +1662,17 @@ namespace
             if (resultado == motor7z::kBien && !m_fallaEscritura && tamanoBien)
             {
                 const auto& it = *m_item;
-                SetFileTime(m_h, it.conCTime ? &it.ctime : nullptr, it.conATime ? &it.atime : nullptr, it.conMTime ? &it.mtime : nullptr);
-                CloseHandle(m_h);
-                m_h = INVALID_HANDLE_VALUE;
                 m_activo = false;
+                if (!m_archivo.Terminar(it.conCTime ? &it.ctime : nullptr, it.conATime ? &it.atime : nullptr,
+                                        it.conMTime ? &it.mtime : nullptr))
+                {
+                    x.QuitarAMedias(m_completa, m_relativa, m_archivo.id);
+                    x.Omitir(m_cruda, L"no se pudo terminar de escribir", Tipo::Falla);
+                    return;
+                }
                 x.m_res.archivos++;
                 x.m_prog.archivos++;
-                x.m_hechos[m_cruda] = { m_completa, m_id };
+                x.m_hechos[m_cruda] = { m_completa, m_archivo.id };
                 x.Marcar(m_completa, m_relativa);
                 return;
             }
@@ -1582,22 +1690,12 @@ namespace
             Fallo(m_indice, m_cruda, m_cifrada, resultado);
         }
 
-        // Quita el archivo a medias por su manejador (es el que se creó aquí). Si Windows no deja, se hace como con
-        // libarchive: se dice cuál quedó y se le pone la marca de la Web.
+        // Quita el archivo a medias por su manejador (es el que se creó aquí). Si Windows no deja, se dice cuál quedó y
+        // se le pone la marca de la Web.
         void Abandonar()
         {
             m_activo = false;
-            FILE_DISPOSITION_INFO borrar = {};
-            borrar.DeleteFile = TRUE;
-            bool borrado = SetFileInformationByHandle(m_h, FileDispositionInfo, &borrar, sizeof(borrar)) != FALSE;
-            CloseHandle(m_h);
-            m_h = INVALID_HANDLE_VALUE;
-            if (borrado)
-            {
-                if (x.m_cancelar || x.m_detenido || x.m_sinEspacio) x.m_res.quitoAMedias = true;
-                return;
-            }
-            x.QuitarAMedias(m_completa, m_relativa, m_id);
+            x.QuitarPropio(m_archivo, m_completa, m_relativa);
         }
         void SinDatos(uint32_t indice, int32_t resultado) override
         {
@@ -1678,8 +1776,7 @@ namespace
         std::wstring m_cruda, m_completa, m_relativa;
         uint32_t m_indice = 0;
         const motor7z::Item* m_item = nullptr;
-        HANDLE m_h = INVALID_HANDLE_VALUE;   // el archivo que se está escribiendo (lo creó Jícaro)
-        Identidad m_id;
+        ArchivoPropio m_archivo;   // el archivo que se está escribiendo (lo creó Jícaro)
         bool m_cifrada = false, m_activo = false, m_fallaEscritura = false;
         const bool m_faltaVolumen;
         int64_t m_escrito = 0;
@@ -1891,6 +1988,10 @@ namespace
         case motor7z::Apertura::SinMemoria:
             m_res.estado = Estado::Error;
             m_res.mensaje = L"No alcanzó la memoria para abrir este archivo.";
+            return;
+        case motor7z::Apertura::SinTope:
+            m_res.estado = Estado::Error;
+            m_res.mensaje = MensajeSinTope();
             return;
         default:
             if (!arc.NoAbrio().empty())
@@ -2226,6 +2327,9 @@ static jicaro::Contenido ListarCon7z(jicaro::motor7z::Formato formato, const std
         return c;
     case motor7z::Apertura::SinMemoria:
         c.mensaje = L"No alcanzó la memoria para leer la lista de este archivo.";
+        return c;
+    case motor7z::Apertura::SinTope:
+        c.mensaje = MensajeSinTope();
         return c;
     default:
         if (!arc.NoAbrio().empty())

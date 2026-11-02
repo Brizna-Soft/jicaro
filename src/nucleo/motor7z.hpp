@@ -56,6 +56,7 @@ namespace jicaro::motor7z
         ClaveMala,    // se dio una contraseña y no abrió (o el archivo está dañado)
         Cancelado,
         SinMemoria,
+        SinTope,      // Windows no dejó poner el tope de memoria con el que se abre (no se abre sin él)
         Error,
     };
 
