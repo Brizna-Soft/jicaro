@@ -87,14 +87,19 @@ namespace
             {
                 auto l16 = [&](size_t p) { return (uint32_t)b[p] | ((uint32_t)b[p + 1] << 8); };
                 auto l32 = [&](size_t p) { return l16(p) | (l16(p + 2) << 16); };
-                // ¿Empieza la lista (el directorio central) en esta posición del archivo?
-                auto hayLista = [&](int64_t pos) {
-                    unsigned char f[4] = {};
+                auto l64 = [&](size_t p) { return (uint64_t)l32(p) | ((uint64_t)l32(p + 4) << 32); };
+                // Lee «cuanto» bytes en esa posición del archivo
+                auto leerEn = [&](uint64_t pos, unsigned char* destino, DWORD cuanto) {
+                    if (pos > (uint64_t)tam.QuadPart || cuanto > (uint64_t)tam.QuadPart - pos) return false;
                     LARGE_INTEGER p;
-                    p.QuadPart = pos;
+                    p.QuadPart = (int64_t)pos;
                     DWORD leidos = 0;
-                    return SetFilePointerEx(h, p, nullptr, FILE_BEGIN) && ReadFile(h, f, 4, &leidos, nullptr) && leidos == 4
-                        && f[0] == 'P' && f[1] == 'K' && f[2] == 1 && f[3] == 2;
+                    return SetFilePointerEx(h, p, nullptr, FILE_BEGIN) && ReadFile(h, destino, cuanto, &leidos, nullptr) && leidos == cuanto;
+                };
+                // ¿Empieza la lista (el directorio central) en esta posición del archivo?
+                auto hayLista = [&](uint64_t pos) {
+                    unsigned char f[4] = {};
+                    return leerEn(pos, f, 4) && f[0] == 'P' && f[1] == 'K' && f[2] == 1 && f[3] == 2;
                 };
                 int sinComprobar = -1;   // un candidato aceptable que no se pudo comprobar del todo
                 for (size_t p = b.size() - 22 + 1; p-- > 0;)
@@ -105,12 +110,41 @@ namespace
                     const uint32_t tamLista = l32(p + 12), posLista = l32(p + 16);
                     if (estaParte == 0xFFFF || parteLista == 0xFFFF || posLista == 0xFFFFFFFF)
                     {
-                        // ZIP64: el localizador de 20 bytes va justo antes y trae el total de partes
+                        // ZIP64: el localizador de 20 bytes va justo antes; dice en qué parte y dónde está el registro
+                        // ZIP64 y cuántas partes hay. Si ese registro está en este archivo, se comprueba igual que el común.
                         if (p < 20 || b[p - 20] != 'P' || b[p - 19] != 'K' || b[p - 18] != 6 || b[p - 17] != 7) continue;
-                        const uint32_t partes = l32(p - 20 + 16);
-                        if (partes < 1 || partes > 100000) continue;
-                        r = (int)partes - 1;
-                        break;
+                        const uint32_t parteReg64 = l32(p - 20 + 4), partes = l32(p - 20 + 16);
+                        const uint64_t posReg64 = l64(p - 20 + 8);
+                        if (partes < 1 || partes > 100000 || parteReg64 >= partes) continue;
+                        if (parteReg64 + 1 != partes)
+                        {
+                            if (sinComprobar < 0) sinComprobar = (int)partes - 1;   // está en otra parte: no se comprueba aquí
+                            continue;
+                        }
+                        unsigned char r64[56] = {};
+                        const uint64_t posLocalizador = (uint64_t)inicioBufer + p - 20;
+                        if (posReg64 > posLocalizador || posLocalizador - posReg64 < 56 || !leerEn(posReg64, r64, 56) || r64[0] != 'P'
+                            || r64[1] != 'K' || r64[2] != 6 || r64[3] != 6)
+                            continue;
+                        auto x32 = [&](size_t q) { return (uint32_t)r64[q] | ((uint32_t)r64[q + 1] << 8) | ((uint32_t)r64[q + 2] << 16) | ((uint32_t)r64[q + 3] << 24); };
+                        auto x64 = [&](size_t q) { return (uint64_t)x32(q) | ((uint64_t)x32(q + 4) << 32); };
+                        const uint32_t esta64 = x32(16), lista64 = x32(20);
+                        const uint64_t enEsta64 = x64(24), total64 = x64(32), tam64 = x64(40), pos64 = x64(48);
+                        if (esta64 != partes - 1 || lista64 > esta64 || enEsta64 > total64) continue;
+                        if (lista64 == esta64)
+                        {
+                            if (total64 == 0)
+                            {
+                                if (esta64 != 0) continue;
+                                r = 0;
+                                break;
+                            }
+                            if (pos64 > posReg64 || tam64 > posReg64 - pos64 || !hayLista(pos64)) continue;
+                            r = (int)esta64;
+                            break;
+                        }
+                        if (sinComprobar < 0 && total64 > 0 && tam64 > 0) sinComprobar = (int)esta64;
+                        continue;
                     }
                     if (parteLista > estaParte || enEsta > total || estaParte > 100000) continue;
                     if (parteLista == estaParte)
@@ -123,7 +157,7 @@ namespace
                             r = 0;
                             break;
                         }
-                        if ((int64_t)posLista + (int64_t)tamLista > posRegistro || !hayLista(posLista)) continue;
+                        if ((int64_t)posLista + (int64_t)tamLista > posRegistro || !hayLista((uint64_t)posLista)) continue;
                         r = (int)estaParte;
                         break;
                     }

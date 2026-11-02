@@ -490,13 +490,27 @@ namespace
             };
         };
         {
-            Prueba p;
-            conClaves({ L"mala", L"clave ñ" }, p);
-            std::wstring destino = Carpeta(L"salida\\zipcrypto");
-            auto r = Extraer(p, c + L"\\clave-zipcrypto.zip", destino);
-            std::wstring que;
-            bool ok = r.estado == jicaro::Estado::Bien && Coincide(destino, Esperado(), que) && p.pidioContrasena == 2;
-            Revisar(ok, L"ZipCrypto: pide otra vez tras la mala y extrae con la buena " + Texto(r) + L" " + que);
+            // ZipCrypto comprueba la contraseña con un solo byte: una mala pasa esa prueba 1 vez de cada 256 (y entonces
+            // el archivo sale «dañado»). El encabezado cifrado es al azar, así que si pasa, se arma otro y se prueba otra vez.
+            bool ok = false;
+            std::wstring detalle;
+            for (int intento = 0; intento < 3 && !ok; intento++)
+            {
+                std::wstring zip = c + L"\\clave-zipcrypto-" + std::to_wstring(intento) + L".zip";
+                Armar(zip, items, [](archive* a) {
+                    archive_write_set_format_zip(a);
+                    archive_write_set_options(a, "zip:hdrcharset=UTF-8,zip:encryption=zipcrypt");
+                    archive_write_set_passphrase(a, Utf8(L"clave ñ").c_str());
+                });
+                Prueba p;
+                conClaves({ L"mala", L"clave ñ" }, p);
+                std::wstring destino = Carpeta(L"salida\\zipcrypto-" + std::to_wstring(intento));
+                auto r = Extraer(p, zip, destino);
+                std::wstring que;
+                ok = r.estado == jicaro::Estado::Bien && Coincide(destino, Esperado(), que) && p.pidioContrasena == 2;
+                detalle = Texto(r) + L" " + que + L" (intento " + std::to_wstring(intento + 1) + L")";
+            }
+            Revisar(ok, L"ZipCrypto: pide otra vez tras la mala y extrae con la buena " + detalle);
         }
         {
             Prueba p;
@@ -1691,9 +1705,13 @@ namespace
                 std::string falso1 = std::string("PK\x05\x06", 4) + std::string("\x01\x00\x02\x00", 4) + std::string(14, '\0');
                 std::string falso2 = std::string("PK\x05\x06", 4) + std::string("\x01\x00\x00\x00\x01\x00\x01\x00\x0A\x00\x00\x00\x00\x00\x00\x00", 16) +
                                      std::string(2, '\0');
-                for (int k = 0; k < 2; k++)
+                // Un localizador ZIP64 falso («2 partes») y un registro final con 0xFFFF justo después
+                std::string falso3 = std::string("PK\x06\x07", 4) + std::string("\x01\x00\x00\x00", 4) + std::string(8, '\0') +
+                                     std::string("\x02\x00\x00\x00", 4) + std::string("PK\x05\x06", 4) +
+                                     std::string("\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF", 16) + std::string(2, '\0');
+                for (int k = 0; k < 3; k++)
                 {
-                    std::string comentario = std::string("un comentario ") + (k == 0 ? falso1 : falso2);
+                    std::string comentario = std::string("un comentario ") + (k == 0 ? falso1 : (k == 1 ? falso2 : falso3));
                     std::string conFalso = z.substr(0, fin + 20);
                     conFalso += (char)(comentario.size() & 0xFF);
                     conFalso += (char)(comentario.size() >> 8);
