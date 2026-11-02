@@ -116,6 +116,8 @@ namespace jicaro::motor7z
         int64_t TotalComprimido() const;
         bool Abierto() const;
         std::wstring NoAbrio() const;                    // la parte que no se pudo leer ("" si no hubo)
+        // Todas las partes que se leyeron, también las que 7z.dll pidió por su nombre (por ejemplo «juego2.rar»)
+        const std::vector<std::wstring>& Volumenes() const;
 
         // Extrae esos índices (de menor a mayor) hacia «d». Devuelve lo que devolvió 7z.dll (E_ABORT si se paró).
         HRESULT Extraer(const std::vector<uint32_t>& indices, Destino& d);

@@ -1413,6 +1413,23 @@ namespace
                     L"cancelar en medio de un 7z quita el archivo a medias " + Texto(rc));
         }
 
+        // Partes con nombres que Jícaro no junta («suelto1.rar», «suelto2.rar»...): las pide 7z.dll y cuentan igual. Si
+        // solo la segunda tiene la marca de la Web, lo extraído igual queda marcado.
+        {
+            CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+            std::wstring c = Carpeta(L"sueltos");
+            for (int i = 1; i <= 8; i++)
+                CopyFileW((trabajo + L"\\libarchive\\rar5multi.part0" + std::to_wstring(i) + L".rar").c_str(),
+                          (c + L"\\suelto" + std::to_wstring(i) + L".rar").c_str(), FALSE);
+            EscribirTodo(c + L"\\suelto2.rar:Zone.Identifier", "[ZoneTransfer]\r\nZoneId=3\r\n");
+            auto juego = volumenes::Buscar(c + L"\\suelto1.rar");
+            std::wstring d = Carpeta(L"salida\\sueltos");
+            auto r = ExtraerSimple(c + L"\\suelto1.rar", d);
+            Revisar(juego.partes.size() == 1 && r.estado == jicaro::Estado::Bien && r.archivos == 2 && r.zona == 3 && r.marcados == 2,
+                    L"partes «suelto1.rar» a «suelto8.rar»: 7z.dll las pide y la marca de la segunda pasa a lo extraído " + Texto(r));
+            CoUninitialize();
+        }
+
         // La marca de la Web también pasa a lo que sale de un RAR y de un 7z
         {
             CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);

@@ -1451,15 +1451,24 @@ namespace
         uint64_t memoriaPedida = 0;
         bool carpetaCambio = false;
 
+        ~Destino7z() override
+        {
+            // Si algo lanzó una excepción en medio, el archivo a medias se quita por su manejador
+            try
+            {
+                if (m_activo) Abandonar();
+            }
+            catch (...)
+            {
+            }
+        }
+
         motor7z::Paso Empieza(uint32_t indice) override
         {
             // Si 7z.dll empieza otro sin haber dicho cómo terminó el anterior, el anterior se da por fallido (se quita)
             if (m_activo)
             {
-                m_activo = false;
-                archive_write_finish_entry(m_w);
-                x.m_enCurso.activo = false;
-                x.QuitarAMedias(m_completa, m_relativa, x.m_enCurso.id);
+                Abandonar();
                 x.Omitir(m_cruda, L"no se terminó de extraer", Tipo::Falla);
             }
             if (x.m_cancelar || indice >= m_items.size()) return motor7z::Paso::Parar;
@@ -1467,6 +1476,7 @@ namespace
             m_cruda = it.ruta;
             m_cifrada = it.cifrada;
             m_indice = indice;
+            m_item = &it;
             x.m_prog.PonerActual(m_cruda);
             auto relativa = x.Preparar(m_cruda, false);
             if (x.m_parar) return motor7z::Paso::Parar;
@@ -1481,39 +1491,32 @@ namespace
                 x.m_res.mensaje = L"Algo cambió la carpeta de trabajo en medio de la extracción; se detuvo por seguridad.";
                 return motor7z::Paso::Parar;
             }
-            if (!x.SigueSeguro(*relativa) || GetFileAttributesW(rutas::Larga(completa).c_str()) != INVALID_FILE_ATTRIBUTES)
+            // Las carpetas de arriba que falten, con la revisión de todo el camino antes y después de crearlas
+            std::wstring carpeta = CarpetaDe(completa);
+            if (!x.SigueSeguro(*relativa) || (!ExisteCarpeta(carpeta) && !CrearCarpetas(carpeta)) || !x.SigueSeguro(*relativa))
             {
                 x.Omitir(m_cruda, L"la carpeta cambió mientras se extraía; no se tocó");
                 return motor7z::Paso::Saltar;
             }
-            x.m_enCurso.activo = false;
-            x.m_enCurso.completa = completa;
-            x.m_enCurso.relativa = *relativa;
-            EntradaPropia s(archive_entry_new());
-            if (!s) throw std::bad_alloc();
-            archive_entry_copy_pathname_w(s.get(), relativa->c_str());
-            archive_entry_set_filetype(s.get(), AE_IFREG);
-            archive_entry_set_perm(s.get(), 0644);
-            if (it.tamano >= 0) archive_entry_set_size(s.get(), it.tamano);
-            PonerFechas(it, s.get());
-            if (archive_write_header(m_w, s.get()) < ARCHIVE_WARN)
+            // Jícaro crea el archivo: con CREATE_NEW nunca toca algo que ya estaba (ni algo que otro programa cree justo
+            // ahora), y con su propio manejador sabe que es el suyo y puede quitarlo sin depender de la ruta
+            HANDLE h = CreateFileW(rutas::Larga(completa).c_str(), GENERIC_WRITE | DELETE, 0, nullptr, CREATE_NEW,
+                                   FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
+            if (h == INVALID_HANDLE_VALUE)
             {
-                x.Omitir(m_cruda, L"no se pudo crear el archivo", Tipo::Falla);
-                archive_write_finish_entry(m_w);
+                DWORD e = GetLastError();
+                x.Omitir(m_cruda,
+                         (e == ERROR_FILE_EXISTS || e == ERROR_ALREADY_EXISTS)
+                             ? L"apareció otro archivo con ese nombre mientras se extraía; no se tocó"
+                             : L"no se pudo crear el archivo",
+                         Tipo::Falla);
                 return motor7z::Paso::Saltar;
             }
-            // libarchive lo crea y lo tiene abierto sin compartir; si no, es que justo apareció otro con ese nombre
-            if (!AbiertoSinCompartir(completa))
-            {
-                archive_write_finish_entry(m_w);
-                x.Omitir(m_cruda, L"apareció otro archivo con ese nombre mientras se extraía; no se tocó", Tipo::Falla);
-                return motor7z::Paso::Saltar;
-            }
-            x.m_enCurso.id = IdentidadDe(completa);
-            x.m_enCurso.activo = true;
+            m_h = h;
+            m_activo = true;
             m_completa = completa;
             m_relativa = *relativa;
-            m_activo = true;
+            m_id = IdentidadDe(h);
             m_escrito = 0;
             m_fallaEscritura = false;
             return motor7z::Paso::Escribir;
@@ -1524,16 +1527,24 @@ namespace
             if (!m_activo) return true;
             if (x.m_cancelar) return false;
             if (m_fallaEscritura) return true;   // lo que falta de este archivo se descarta
-            if (archive_write_data_block(m_w, datos, tamano, m_escrito) < ARCHIVE_OK)
+            const char* p = static_cast<const char*>(datos);
+            size_t quedan = tamano;
+            while (quedan > 0)
             {
-                int64_t libre = EspacioLibre(x.m_destino);
-                if (libre >= 0 && libre < (64LL << 20))
+                DWORD escritos = 0;
+                if (!WriteFile(m_h, p, (DWORD)std::min<size_t>(quedan, 1u << 30), &escritos, nullptr) || escritos == 0)
                 {
-                    x.m_sinEspacio = true;
-                    return false;
+                    int64_t libre = EspacioLibre(x.m_destino);
+                    if (libre >= 0 && libre < (64LL << 20))
+                    {
+                        x.m_sinEspacio = true;
+                        return false;
+                    }
+                    m_fallaEscritura = true;
+                    return true;
                 }
-                m_fallaEscritura = true;
-                return true;
+                p += escritos;
+                quedan -= escritos;
             }
             m_escrito += (int64_t)tamano;
             return x.Controlar((int64_t)tamano);
@@ -1542,26 +1553,52 @@ namespace
         void Termina(int32_t resultado) override
         {
             if (!m_activo) return;
-            m_activo = false;
-            int fin = archive_write_finish_entry(m_w);
-            x.m_enCurso.activo = false;
-            if (resultado == motor7z::kBien && !m_fallaEscritura && fin >= ARCHIVE_WARN)
+            // Tiene que llegar justo el tamaño que anuncia el archivo: nada crece a escondidas de los topes
+            const bool tamanoBien = m_item->tamano < 0 || m_escrito == m_item->tamano;
+            if (resultado == motor7z::kBien && !m_fallaEscritura && tamanoBien)
             {
+                const auto& it = *m_item;
+                SetFileTime(m_h, it.conCTime ? &it.ctime : nullptr, it.conATime ? &it.atime : nullptr, it.conMTime ? &it.mtime : nullptr);
+                CloseHandle(m_h);
+                m_h = INVALID_HANDLE_VALUE;
+                m_activo = false;
                 x.m_res.archivos++;
                 x.m_prog.archivos++;
-                x.m_hechos[m_cruda] = { m_completa, x.m_enCurso.id };
+                x.m_hechos[m_cruda] = { m_completa, m_id };
                 x.Marcar(m_completa, m_relativa);
                 return;
             }
-            x.QuitarAMedias(m_completa, m_relativa, x.m_enCurso.id);
-            if (m_fallaEscritura || fin < ARCHIVE_WARN)
+            Abandonar();
+            if (m_fallaEscritura)
             {
                 x.Omitir(m_cruda, L"no se pudo escribir en el disco", Tipo::Falla);
+                return;
+            }
+            if (resultado == motor7z::kBien)
+            {
+                x.Omitir(m_cruda, L"está dañado: no trae el tamaño que anuncia", Tipo::Falla);
                 return;
             }
             Fallo(m_indice, m_cruda, m_cifrada, resultado);
         }
 
+        // Quita el archivo a medias por su manejador (es el que se creó aquí). Si Windows no deja, se hace como con
+        // libarchive: se dice cuál quedó y se le pone la marca de la Web.
+        void Abandonar()
+        {
+            m_activo = false;
+            FILE_DISPOSITION_INFO borrar = {};
+            borrar.DeleteFile = TRUE;
+            bool borrado = SetFileInformationByHandle(m_h, FileDispositionInfo, &borrar, sizeof(borrar)) != FALSE;
+            CloseHandle(m_h);
+            m_h = INVALID_HANDLE_VALUE;
+            if (borrado)
+            {
+                if (x.m_cancelar || x.m_detenido || x.m_sinEspacio) x.m_res.quitoAMedias = true;
+                return;
+            }
+            x.QuitarAMedias(m_completa, m_relativa, m_id);
+        }
         void SinDatos(uint32_t indice, int32_t resultado) override
         {
             if (resultado == motor7z::kBien || indice >= m_items.size()) return;
@@ -1570,11 +1607,11 @@ namespace
 
         void Fallo(uint32_t indice, const std::wstring& cruda, bool cifrada, int32_t resultado)
         {
-            // La contraseña no sirvió: RAR 5 lo sabe (trae con qué comprobarla). En RAR 4 y 7z no hay cómo comprobarla:
-            // un dato que no cuadra en un archivo con contraseña casi siempre es la contraseña (si no falta una parte).
-            const bool sinComprobar = x.m_formato7z != motor7z::Formato::Rar5 && !m_faltaVolumen;
+            // La contraseña no sirvió: a veces 7z.dll lo sabe (RAR 5 casi siempre trae con qué comprobarla). Si no, un dato
+            // que no cuadra en un archivo con contraseña casi siempre es la contraseña (salvo que falte una parte), así
+            // que se puede probar otra; el aviso dice «o el archivo está dañado».
             if (resultado == motor7z::kClaveIncorrecta
-                || (cifrada && sinComprobar && (resultado == motor7z::kDatosDanados || resultado == motor7z::kCrcMalo)))
+                || (cifrada && !m_faltaVolumen && (resultado == motor7z::kDatosDanados || resultado == motor7z::kCrcMalo)))
             {
                 clavesMalas.push_back(indice);
                 return;
@@ -1614,13 +1651,7 @@ namespace
         // Después de cada vuelta de 7z.dll: lo que quedó a medias se quita y se dice por qué se cortó
         void Despues(HRESULT hr)
         {
-            if (m_activo)
-            {
-                m_activo = false;
-                archive_write_finish_entry(m_w);
-                x.m_enCurso.activo = false;
-                x.QuitarAMedias(m_completa, m_relativa, x.m_enCurso.id);
-            }
+            if (m_activo) Abandonar();
             if (hr == S_OK || x.Paro()) return;   // si se detuvo por algo que ya se sabe, eso es lo que se dice
             if (sinClave)
             {
@@ -1646,6 +1677,9 @@ namespace
         archive* m_w;
         std::wstring m_cruda, m_completa, m_relativa;
         uint32_t m_indice = 0;
+        const motor7z::Item* m_item = nullptr;
+        HANDLE m_h = INVALID_HANDLE_VALUE;   // el archivo que se está escribiendo (lo creó Jícaro)
+        Identidad m_id;
         bool m_cifrada = false, m_activo = false, m_fallaEscritura = false;
         const bool m_faltaVolumen;
         int64_t m_escrito = 0;
@@ -1761,9 +1795,7 @@ namespace
         }
         for (uint32_t i : d.clavesMalas)
         {
-            Omitir(items[i].ruta, m_formato7z == motor7z::Formato::Rar5 ? L"la contraseña no sirvió"
-                                                                         : L"la contraseña no sirvió (o el archivo está dañado)",
-                   Tipo::Clave);
+            Omitir(items[i].ruta, L"la contraseña no sirvió (o el archivo está dañado)", Tipo::Clave);
             m_res.clavesMalas++;
         }
         if (!d.metodoDesconocido.empty()) ProbarConLibarchive(items, d.metodoDesconocido, trabajo, w);
@@ -1894,6 +1926,25 @@ namespace
         {
             m_clave = arc.ClaveUsada();
             m_dioClave = true;
+        }
+        // Las partes que 7z.dll abrió por su nombre y Jícaro no había juntado (por ejemplo «juego2.rar» después de
+        // «juego1.rar») cuentan igual: para la marca de la Web, para el tamaño y para no reemplazarlas nunca
+        bool otras = false;
+        for (const auto& v : arc.Volumenes())
+        {
+            std::wstring completa = RutaCompleta(v);
+            bool ya = std::any_of(m_partesCompletas.begin(), m_partesCompletas.end(),
+                                  [&](const std::wstring& p) { return IgualesSinMayusculas(p, completa); });
+            if (ya) continue;
+            m_partesCompletas.push_back(completa);
+            m_idPartes.push_back(IdentidadDe(completa));
+            if (int64_t t = TamanoArchivo(completa); t > 0) m_comprimido += t;
+            otras = true;
+        }
+        if (otras && m_op.pasarMarca)
+        {
+            m_zona = marca::ZonaDelJuego(m_partesCompletas, m_referente);
+            m_res.zona = marca::HayQueMarcar(m_zona) ? m_zona : 0;
         }
         ConEscritor([&](CarpetaDeTrabajo& trabajo, archive* w) { Bucle7z(arc, trabajo, w); });
 

@@ -3,6 +3,7 @@
 #include <windows.h>
 #include <oleauto.h>
 #include <propidl.h>
+#include <psapi.h>
 
 #include <algorithm>
 #include <condition_variable>
@@ -282,9 +283,26 @@ namespace jicaro::motor7z
                 return E_NOINTERFACE;
             }
 
+            // Nada puede lanzar una excepción hacia 7z.dll: todo se convierte en un código de error
             HRESULT STDMETHODCALLTYPE Read(void* datos, UInt32 tamano, UInt32* leidos) override
             {
                 if (leidos) *leidos = 0;
+                try
+                {
+                    return Leer(datos, tamano, leidos);
+                }
+                catch (const std::bad_alloc&)
+                {
+                    return E_OUTOFMEMORY;
+                }
+                catch (...)
+                {
+                    return E_FAIL;
+                }
+            }
+
+            HRESULT Leer(void* datos, UInt32 tamano, UInt32* leidos)
+            {
                 if (tamano == 0) return S_OK;
                 if (m_cancelar && *m_cancelar) return E_ABORT;
                 std::lock_guard g(m_m);
@@ -314,6 +332,18 @@ namespace jicaro::motor7z
             }
 
             HRESULT STDMETHODCALLTYPE Seek(Int64 desplazamiento, UInt32 desde, UInt64* nueva) override
+            {
+                try
+                {
+                    return Mover(desplazamiento, desde, nueva);
+                }
+                catch (...)
+                {
+                    return E_FAIL;
+                }
+            }
+
+            HRESULT Mover(Int64 desplazamiento, UInt32 desde, UInt64* nueva)
             {
                 std::lock_guard g(m_m);
                 int64_t base = desde == 0 ? 0 : (desde == 1 ? m_pos : (desde == 2 ? m_total : -1));
@@ -411,6 +441,7 @@ namespace jicaro::motor7z
 
             bool Pidio() const { return m_pidio; }
             bool SinClave() const { return m_sinClave; }
+            const std::vector<std::wstring>& Usadas() const { return m_usadas; }
             const std::optional<std::wstring>& Clave() const { return m_clave; }
             const std::vector<std::wstring>& Faltan() const { return m_faltan; }
             const std::wstring& NoAbrio() const { return m_noAbrio; }
@@ -468,6 +499,7 @@ namespace jicaro::motor7z
                         m_faltan.push_back(n);
                         return S_FALSE;
                     }
+                    m_usadas.push_back(ruta);
                     *entrada = f;
                     return S_OK;
                 }
@@ -538,7 +570,7 @@ namespace jicaro::motor7z
             Progreso* m_progreso;
             const std::atomic<bool>* m_cancelar;
             std::wstring m_nombre, m_carpeta, m_noAbrio;
-            std::vector<std::wstring> m_faltan;
+            std::vector<std::wstring> m_faltan, m_usadas;
             size_t m_pedidas = 0;
             std::optional<std::wstring> m_clave;
             bool m_pidio = false, m_yaPregunto = false, m_sinClave = false;
@@ -697,7 +729,14 @@ namespace jicaro::motor7z
             // 7z.dll la llama seguido, a veces desde otro hilo: así se puede cancelar en medio de algo largo
             HRESULT STDMETHODCALLTYPE SetCompleted(const UInt64*) override
             {
-                return ((m_cancelar && *m_cancelar) || m_canal->Cerrado()) ? E_ABORT : S_OK;
+                try
+                {
+                    return ((m_cancelar && *m_cancelar) || m_canal->Cerrado()) ? E_ABORT : S_OK;
+                }
+                catch (...)
+                {
+                    return E_ABORT;
+                }
             }
 
             HRESULT STDMETHODCALLTYPE GetStream(UInt32 indice, ISequentialOutStream** salida, Int32 modo) override
@@ -804,9 +843,59 @@ namespace jicaro::motor7z
 
     // ---------------------------------------------------------------------------------------------------------------
 
+    namespace
+    {
+        // Mientras 7z.dll lee la lista de un archivo, el proceso tiene un tope de memoria (un «Job» de Windows): una
+        // lista comprimida enorme (una trampa) falla en vez de llenar la memoria de la PC. Los programas que Jícaro abra
+        // no quedan dentro. Si Windows no deja poner el tope, se sigue sin él.
+        HANDLE TrabajoDeMemoria()
+        {
+            static HANDLE job = []() -> HANDLE {
+                HANDLE j = CreateJobObjectW(nullptr, nullptr);
+                if (!j) return nullptr;
+                JOBOBJECT_EXTENDED_LIMIT_INFORMATION l{};
+                l.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK;
+                if (!SetInformationJobObject(j, JobObjectExtendedLimitInformation, &l, sizeof(l))
+                    || !AssignProcessToJobObject(j, GetCurrentProcess()))
+                {
+                    CloseHandle(j);
+                    return nullptr;
+                }
+                return j;
+            }();
+            return job;
+        }
+
+        void PonerTope(uint64_t bytes)
+        {
+            HANDLE j = TrabajoDeMemoria();
+            if (!j) return;
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION l{};
+            l.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK | (bytes ? JOB_OBJECT_LIMIT_PROCESS_MEMORY : 0);
+            l.ProcessMemoryLimit = (SIZE_T)bytes;
+            SetInformationJobObject(j, JobObjectExtendedLimitInformation, &l, sizeof(l));
+        }
+
+        struct TopeAlAbrir
+        {
+            TopeAlAbrir()
+            {
+                PROCESS_MEMORY_COUNTERS_EX m{};
+                uint64_t usada = 0;
+                if (GetProcessMemoryInfo(GetCurrentProcess(), reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&m), sizeof(m)))
+                    usada = m.PrivateUsage;
+                PonerTope(usada + (2ULL << 30));   // 2 GB más de lo que ya usa: de sobra para una lista de verdad
+            }
+            ~TopeAlAbrir() { PonerTope(0); }
+            TopeAlAbrir(const TopeAlAbrir&) = delete;
+            TopeAlAbrir& operator=(const TopeAlAbrir&) = delete;
+        };
+    }
+
     struct Archivo::Interno
     {
         Ptr<IInArchive> arc;
+        std::vector<std::wstring> volumenes;
         Formato formato = Formato::SieteZ;
         std::vector<Item> items;
         bool pidioClave = false, incompleto = false, danado = false;
@@ -972,6 +1061,7 @@ namespace jicaro::motor7z
         m->clave.reset();
         m->faltaVolumen.clear();
         m->noAbrio.clear();
+        m->volumenes.clear();
     }
 
     Apertura Archivo::Abrir(const std::vector<std::wstring>& partes, Formato formato,
@@ -1006,7 +1096,13 @@ namespace jicaro::motor7z
         }
         Ptr<AlAbrir> cb(new AlAbrir(partes, porVolumenes, std::move(clave), &progreso, &cancelar));
         const UInt64 soloAlPrincipio = 0;   // la firma ya se vio al principio: no se busca más adentro
-        HRESULT hr = m->arc->Open(flujo.get(), &soloAlPrincipio, cb.get());
+        HRESULT hr = E_FAIL;
+        {
+            TopeAlAbrir tope;
+            hr = m->arc->Open(flujo.get(), &soloAlPrincipio, cb.get());
+        }
+        m->volumenes = porVolumenes ? std::vector<std::wstring>{ partes.front() } : partes;
+        for (auto& u : cb->Usadas()) m->volumenes.push_back(u);
         m->pidioClave = cb->Pidio();
         if (cb->Clave()) m->clave = *cb->Clave();
         if (m->noAbrio.empty()) m->noAbrio = cb->NoAbrio();
@@ -1068,6 +1164,7 @@ namespace jicaro::motor7z
     int64_t Archivo::TotalComprimido() const { return m->total; }
     bool Archivo::Abierto() const { return (bool)m->arc; }
     std::wstring Archivo::NoAbrio() const { return m->noAbrio; }
+    const std::vector<std::wstring>& Archivo::Volumenes() const { return m->volumenes; }
 
     HRESULT Archivo::Extraer(const std::vector<uint32_t>& indices, Destino& d)
     {
