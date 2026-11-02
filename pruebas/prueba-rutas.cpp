@@ -216,6 +216,25 @@ namespace
         j = volumenes::Buscar(c + L"\\solo.rar");
         Revisar(j.tipo == volumenes::Tipo::Uno && j.partes.size() == 1 && j.nombreBase == L"solo", L"un solo .rar");
 
+        CrearVacio(c + L"\\fotos.z01");
+        CrearVacio(c + L"\\fotos.z02");
+        CrearVacio(c + L"\\fotos.zip");
+        j = volumenes::Buscar(c + L"\\fotos.zip");
+        Revisar(j.tipo == volumenes::Tipo::ZipPartes && j.partes.size() == 3 && j.partes[0].ends_with(L"fotos.z01")
+                    && j.partes[2].ends_with(L"fotos.zip") && j.faltan.empty() && j.seguidas == 3 && j.nombreBase == L"fotos",
+                L"ZIP en partes: .z01 + .z02 + .zip desde el .zip");
+        j = volumenes::Buscar(c + L"\\fotos.z02");
+        Revisar(j.tipo == volumenes::Tipo::ZipPartes && j.partes.size() == 3, L"ZIP en partes desde la .z02");
+        CrearVacio(c + L"\\cortado.z01");
+        CrearVacio(c + L"\\cortado.z03");
+        j = volumenes::Buscar(c + L"\\cortado.z03");
+        Revisar(j.tipo == volumenes::Tipo::ZipPartes && j.faltan.size() == 2 && j.faltan[0] == L"cortado.z02" && j.faltan[1] == L"cortado.zip"
+                    && j.seguidas == 0,
+                L"ZIP en partes: faltan cortado.z02 y cortado.zip");
+        CrearVacio(c + L"\\solo.zip");
+        j = volumenes::Buscar(c + L"\\solo.zip");
+        Revisar(j.tipo == volumenes::Tipo::Uno && j.partes.size() == 1, L"un ZIP solo no es un ZIP en partes");
+
         CrearVacio(c + L"\\datos.7z.001");
         CrearVacio(c + L"\\datos.7z.002");
         j = volumenes::Buscar(c + L"\\datos.7z.002");

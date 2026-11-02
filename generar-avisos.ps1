@@ -43,7 +43,7 @@ $sb = New-Object System.Text.StringBuilder
 [void]$sb.AppendLine('------------------------------------------------------------------------')
 [void]$sb.AppendLine("7-Zip $versionSieteZip (7z.dll)")
 [void]$sb.AppendLine('------------------------------------------------------------------------')
-[void]$sb.AppendLine('Jícaro usa 7z.dll, de 7-Zip, para abrir los RAR y los 7z (también con contraseña y en partes).')
+[void]$sb.AppendLine('Jícaro usa 7z.dll, de 7-Zip, para abrir los RAR y los 7z (también con contraseña y en partes) y los ZIP en partes.')
 [void]$sb.AppendLine('7z.dll va como archivo aparte, sin ningún cambio, junto a Jicaro.exe: se puede cambiar por otra versión')
 [void]$sb.AppendLine('compatible de 7-Zip. Jícaro solo extrae: no crea RAR ni 7z.')
 [void]$sb.AppendLine('')

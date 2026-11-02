@@ -1570,6 +1570,50 @@ namespace
                L"abrió. Cierra otros programas y vuelve a intentarlo.";
     }
 
+    // ZIP con 7z.dll: 7-Zip pasa la contraseña a la página de códigos ANSI de Windows. Los ZIP hechos en Linux o en Mac la
+    // guardan en UTF-8, y los muy viejos en la página OEM: es la misma contraseña escrita de otra forma (lo mismo que se
+    // prueba con libarchive). Cada forma va «disfrazada» de texto que la página ANSI convierte justo en esos bytes.
+    std::vector<std::wstring> VariantesZip(const std::wstring& clave)
+    {
+        std::vector<std::wstring> r;
+        if (std::all_of(clave.begin(), clave.end(), [](wchar_t c) { return c < 0x80; })) return r;
+        auto disfrazar = [](const std::string& bytes) -> std::optional<std::wstring> {
+            std::wstring w;
+            for (unsigned char b : bytes)
+            {
+                wchar_t c = 0;
+                if (MultiByteToWideChar(CP_ACP, MB_ERR_INVALID_CHARS, reinterpret_cast<const char*>(&b), 1, &c, 1) != 1) return std::nullopt;
+                w.push_back(c);
+            }
+            BOOL perdio = FALSE;
+            int n = WideCharToMultiByte(CP_ACP, WC_NO_BEST_FIT_CHARS, w.data(), (int)w.size(), nullptr, 0, nullptr, &perdio);
+            if (n != (int)bytes.size() || perdio) return std::nullopt;
+            std::string vuelta((size_t)n, '\0');
+            WideCharToMultiByte(CP_ACP, WC_NO_BEST_FIT_CHARS, w.data(), (int)w.size(), vuelta.data(), n, nullptr, &perdio);
+            if (perdio || vuelta != bytes) return std::nullopt;
+            return w;
+        };
+        auto agregar = [&](std::optional<std::wstring> v) {
+            if (v && *v != clave && std::find(r.begin(), r.end(), *v) == r.end()) r.push_back(std::move(*v));
+        };
+        agregar(disfrazar(Utf8(clave)));
+        BOOL perdio = FALSE;
+        int n = WideCharToMultiByte(GetOEMCP(), WC_NO_BEST_FIT_CHARS, clave.data(), (int)clave.size(), nullptr, 0, nullptr, &perdio);
+        if (n > 0 && !perdio)
+        {
+            std::string oem((size_t)n, '\0');
+            WideCharToMultiByte(GetOEMCP(), WC_NO_BEST_FIT_CHARS, clave.data(), (int)clave.size(), oem.data(), n, nullptr, &perdio);
+            if (!perdio) agregar(disfrazar(oem));
+        }
+        return r;
+    }
+
+    std::wstring MensajeZipSinMotor()
+    {
+        return L"Para abrir un ZIP en partes (.z01, .z02... y .zip), Jícaro necesita el archivo 7z.dll junto a Jicaro.exe, y "
+               L"no está: vuelve a bajar Jícaro y descomprímelo entero.";
+    }
+
     std::wstring MensajeFalta(const std::wstring& parte)
     {
         return L"Falta la parte «" + parte + L"». Revisa que se hayan bajado todas las partes y que estén en la misma carpeta.";
@@ -1892,8 +1936,25 @@ namespace
 
         Destino7z d(*this, arc, trabajo, w);
         if (!pedir.empty()) d.proximo = items[pedir.front()].ruta;
+        // ZIP: antes de pedir otra contraseña, la misma escrita de otra forma (UTF-8, OEM), solo con los que fallaron
+        auto probarVariantes = [&]() {
+            if (m_formato7z != motor7z::Formato::Zip || !m_clave || d.clavesMalas.empty() || Paro()) return;
+            const std::wstring original = *m_clave;
+            for (auto& v : VariantesZip(original))
+            {
+                if (d.clavesMalas.empty() || Paro()) break;
+                m_clave = v;
+                std::vector<uint32_t> otraVez;
+                otraVez.swap(d.clavesMalas);
+                d.Despues(arc.Extraer(otraVez, d));
+                BorrarTexto(v);
+            }
+            if (m_clave) BorrarTexto(*m_clave);
+            m_clave = original;
+        };
         HRESULT hr = arc.Extraer(pedir, d);
         d.Despues(hr);
+        probarVariantes();
         // Los que no salieron porque la contraseña no sirvió: se pregunta otra (si hay a quién) y se prueban solo esos.
         // Nunca se prueban claves por cuenta propia.
         while (!d.clavesMalas.empty() && !Paro() && m_pr.contrasena)
@@ -1904,6 +1965,7 @@ namespace
             otraVez.swap(d.clavesMalas);
             hr = arc.Extraer(otraVez, d);
             d.Despues(hr);
+            probarVariantes();
         }
         for (uint32_t i : d.clavesMalas)
         {
@@ -2123,10 +2185,16 @@ namespace
             m_dioClave = true;
         }
 
-        // Los RAR y los 7z, con 7z.dll (si está junto al programa); lo demás, con libarchive
+        // Los RAR, los 7z y los ZIP en partes, con 7z.dll (si está junto al programa); lo demás, con libarchive
         std::optional<motor7z::Formato> formato;
-        if (!m_soloSuelto && motor7z::Disponible()) formato = motor7z::Detectar(m_partesCompletas.front());
+        if (!m_soloSuelto && motor7z::Disponible()) formato = motor7z::DetectarPartes(m_partesCompletas);
         if (formato) Ejecutar7z(*formato);
+        else if (motor7z::EsZipEnPartes(m_partesCompletas))
+        {
+            // libarchive no junta los ZIP en partes: sin 7z.dll no se pueden abrir
+            m_res.estado = Estado::Error;
+            m_res.mensaje = MensajeZipSinMotor();
+        }
         else EjecutarLibarchive();
         if (m_clave) BorrarTexto(*m_clave);
         m_clave.reset();
@@ -2426,13 +2494,22 @@ jicaro::Contenido jicaro::Listar(const std::vector<std::wstring>& partes, const 
 {
     try
     {
-        // Los RAR y los 7z, con 7z.dll (si está junto al programa)
-        if (!partes.empty() && motor7z::Disponible())
+        // Los RAR, los 7z y los ZIP en partes, con 7z.dll (si está junto al programa)
+        if (!partes.empty())
         {
             std::vector<std::wstring> completas;
             for (auto& p : partes) completas.push_back(RutaCompleta(p));
-            progreso.Reiniciar();
-            if (auto f = motor7z::Detectar(completas.front())) return ListarCon7z(*f, completas, progreso, cancelar, preguntas, clave);
+            if (motor7z::Disponible())
+            {
+                progreso.Reiniciar();
+                if (auto f = motor7z::DetectarPartes(completas)) return ListarCon7z(*f, completas, progreso, cancelar, preguntas, clave);
+            }
+            else if (motor7z::EsZipEnPartes(completas))
+            {
+                Contenido c;
+                c.mensaje = MensajeZipSinMotor();
+                return c;
+            }
         }
         Contenido c = ListarAdentro(partes, nombreSuelto, progreso, cancelar, false);
         // Un .gz de un archivo que empieza con ceros parece un TAR vacío: si el nombre no dice TAR, se lee como suelto

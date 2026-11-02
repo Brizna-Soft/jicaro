@@ -1,6 +1,7 @@
 #pragma once
 
-// Motor de 7-Zip para RAR 4, RAR 5 y 7z (también con contraseña y en partes). Usa 7z.dll, de 7-Zip (Igor Pavlov,
+// Motor de 7-Zip para RAR 4, RAR 5 y 7z (también con contraseña y en partes) y para los ZIP en partes (.z01, .z02... y
+// .zip), que libarchive no junta. Usa 7z.dll, de 7-Zip (Igor Pavlov,
 // licencia LGPL con partes BSD y la restricción de unRAR), que va junto a Jicaro.exe y se carga desde esa carpeta con su
 // ruta completa. Jícaro solo la usa para leer: no crea RAR ni 7z.
 //
@@ -25,13 +26,19 @@
 
 namespace jicaro::motor7z
 {
-    enum class Formato { Rar, Rar5, SieteZ };
+    enum class Formato { Rar, Rar5, SieteZ, Zip };
 
     // 7z.dll junto al programa y lista para usar (se carga una sola vez). false si no está o no sirve.
     bool Disponible();
 
     // Por la firma de la primera parte. nullopt: no es RAR ni 7z (lo lee libarchive).
     std::optional<Formato> Detectar(const std::wstring& primera);
+
+    // ¿Son las partes de un ZIP en partes? («nombre.z01», «nombre.z02»... y al final «nombre.zip»)
+    bool EsZipEnPartes(const std::vector<std::wstring>& partes);
+
+    // Lo que hay que usar para estas partes: un ZIP en partes por sus nombres; si no, por la firma de la primera.
+    std::optional<Formato> DetectarPartes(const std::vector<std::wstring>& partes);
 
     struct Item
     {

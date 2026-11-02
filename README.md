@@ -32,7 +32,9 @@ en Honduras.
   Sirve con ZIP (ZipCrypto y AES), RAR 4, RAR 5 y 7z, también en varias partes.
 - **RAR en varias partes.** Abre cualquier parte (`juego.part03.rar`) y Jícaro junta el juego completo, desde la
   primera. Sirve con el estilo nuevo (`.part01.rar`, `.part02.rar`...) y con el viejo (`.rar`, `.r00`, `.r01`...).
-  También los archivos cortados en trozos `.7z.001`, `.7z.002`... **Si falta una parte, te dice cuál.**
+  También los ZIP en partes (`juego.z01`, `juego.z02`... y `juego.zip`, como los que hacen WinZip, WinRAR o Info-ZIP,
+  también con contraseña) y los archivos cortados en trozos `.7z.001`, `.7z.002`... **Si falta una parte, te dice
+  cuál.**
 - **Ver antes de extraer:** arrastra el archivo a la ventana (o pulsa **Abrir...**) y ves lo que trae, con su tamaño
   y su fecha. Puedes extraer todo o solo lo que elijas, con progreso y un botón para cancelar.
 - **Clic derecho:** si lo activas en **Ajustes**, aparecen «Extraer aquí» y «Extraer en una carpeta con su nombre».
@@ -102,7 +104,7 @@ Jicaro.exe --extraer "<archivo>" [--destino "<carpeta>" | --aqui] [--si-existe p
 
 - Sin `--destino` ni `--aqui`, extrae en una carpeta nueva con el nombre del archivo, al lado de él.
 - Muestra una ventana chica de progreso. Si todo sale bien se cierra sola; si algo falla, se queda con el resumen.
-- Si se le pasa cualquier parte de un RAR en varias partes, extrae el juego completo. Si se abren varias ventanas
+- Si se le pasa cualquier parte de un RAR o un ZIP en varias partes, extrae el juego completo. Si se abren varias ventanas
   para el mismo juego (por ejemplo, al elegir todas las partes y pulsar «Extraer aquí»), solo una extrae.
 - Sin `--si-existe`, usa lo que la persona eligió en Ajustes.
 - **Contraseña:** sin `--contrasena-stdin`, si hace falta, Jícaro la pide en una ventana (y otra vez si no sirve). Con

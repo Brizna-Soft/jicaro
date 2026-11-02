@@ -1,14 +1,15 @@
 #pragma once
 
 // Archivos en varias partes: «nombre.part01.rar» ... «nombre.part16.rar», el estilo viejo «nombre.rar» + «nombre.r00»,
-// «nombre.r01»... y los cortados en trozos «nombre.7z.001», «nombre.7z.002»...
+// «nombre.r01»..., los ZIP en partes «nombre.z01», «nombre.z02»... + «nombre.zip», y los cortados en trozos
+// «nombre.7z.001», «nombre.7z.002»...
 
 #include <string>
 #include <vector>
 
 namespace jicaro::volumenes
 {
-    enum class Tipo { Uno, RarNuevo, RarViejo, Numerado };
+    enum class Tipo { Uno, RarNuevo, RarViejo, Numerado, ZipPartes };
 
     struct Juego
     {

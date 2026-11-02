@@ -45,7 +45,7 @@ namespace jicaro::motor7z
         // Los formatos: {23170F69-40C1-278A-1000-000110ff0000} (ff: número del formato en 7-Zip)
         GUID ClaseDe(Formato f)
         {
-            unsigned char id = f == Formato::Rar ? 0x03 : (f == Formato::Rar5 ? 0xCC : 0x07);
+            unsigned char id = f == Formato::Rar ? 0x03 : (f == Formato::Rar5 ? 0xCC : (f == Formato::Zip ? 0x01 : 0x07));
             return GUID{ 0x23170F69, 0x40C1, 0x278A, { 0x10, 0x00, 0x00, 0x01, 0x10, id, 0x00, 0x00 } };
         }
 
@@ -431,9 +431,12 @@ namespace jicaro::motor7z
         class AlAbrir final : public Objeto<IArchiveOpenCallback, IArchiveOpenVolumeCallback, ICryptoGetTextPassword>
         {
         public:
-            AlAbrir(const std::vector<std::wstring>& partes, bool porVolumenes, std::function<std::optional<std::wstring>()> clave,
-                    Progreso* progreso, const std::atomic<bool>* cancelar)
-                : m_partes(partes), m_porVolumenes(porVolumenes), m_pedir(std::move(clave)), m_progreso(progreso), m_cancelar(cancelar)
+            // «enOrden»: si una parte que pide 7z.dll no está con ese nombre, se le da la siguiente del juego (RAR, que
+            // las pide de una en una y en orden; un ZIP en partes las pide salteadas, así que no)
+            AlAbrir(const std::vector<std::wstring>& partes, bool porVolumenes, bool enOrden,
+                    std::function<std::optional<std::wstring>()> clave, Progreso* progreso, const std::atomic<bool>* cancelar)
+                : m_partes(partes), m_porVolumenes(porVolumenes), m_enOrden(enOrden), m_pedir(std::move(clave)), m_progreso(progreso),
+                  m_cancelar(cancelar)
             {
                 m_nombre = NombreDe(partes.front());
                 m_carpeta = CarpetaDe(partes.front());
@@ -560,12 +563,12 @@ namespace jicaro::motor7z
                 DWORD a = GetFileAttributesW(rutas::Larga(enCarpeta).c_str());
                 if (a != INVALID_FILE_ATTRIBUTES && !(a & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT))) return enCarpeta;
                 // Partes con otro nombre (por ejemplo, renombradas): la que sigue en el juego que encontró Jícaro
-                if (m_pedidas < m_partes.size()) return m_partes[m_pedidas];
+                if (m_enOrden && m_pedidas < m_partes.size()) return m_partes[m_pedidas];
                 return L"";
             }
 
             std::vector<std::wstring> m_partes;
-            bool m_porVolumenes;
+            bool m_porVolumenes, m_enOrden;
             std::function<std::optional<std::wstring>()> m_pedir;
             Progreso* m_progreso;
             const std::atomic<bool>* m_cancelar;
@@ -1045,6 +1048,24 @@ namespace jicaro::motor7z
         return std::nullopt;
     }
 
+    bool EsZipEnPartes(const std::vector<std::wstring>& partes)
+    {
+        if (partes.size() < 2 || !TerminaSinMayusculas(partes.back(), L".zip")) return false;
+        std::wstring n = NombreDe(partes.front());
+        size_t punto = n.rfind(L'.');
+        if (punto == std::wstring::npos || n.size() - punto < 4 || towlower(n[punto + 1]) != L'z') return false;
+        for (size_t i = punto + 2; i < n.size(); i++)
+            if (!iswdigit(n[i])) return false;
+        return true;
+    }
+
+    std::optional<Formato> DetectarPartes(const std::vector<std::wstring>& partes)
+    {
+        if (partes.empty()) return std::nullopt;
+        if (EsZipEnPartes(partes)) return Formato::Zip;
+        return Detectar(partes.front());
+    }
+
     Archivo::Archivo() : m(std::make_unique<Interno>()) {}
 
     Archivo::~Archivo() { Cerrar(); }
@@ -1086,8 +1107,9 @@ namespace jicaro::motor7z
         if (FAILED(crear(&clase, &IID_IInArchive, reinterpret_cast<void**>(&a))) || !a) return Apertura::Error;
         m->arc.Poner(a);
 
-        // Un RAR en partes con sus nombres de siempre (.part1.rar, .r00...): se abre la primera y 7z.dll pide las
-        // demás. Un .001, .002... (y todos los 7z, que se cortan en trozos): se lee todo seguido.
+        // Un RAR en partes con sus nombres de siempre (.part1.rar, .r00...) y un ZIP en partes (.z01... y .zip): se abre
+        // la primera y 7z.dll pide las demás por su nombre. Un .001, .002... (y todos los 7z, que se cortan en trozos):
+        // se lee todo seguido.
         bool porVolumenes = formato != Formato::SieteZ && !EsNumerada(partes.front());
         Ptr<Flujo> flujo(new Flujo(porVolumenes ? std::vector<std::wstring>{ partes.front() } : partes, &progreso, &cancelar));
         if (!flujo->Falta().empty())
@@ -1096,7 +1118,8 @@ namespace jicaro::motor7z
             m->arc.Soltar();
             return Apertura::Error;
         }
-        Ptr<AlAbrir> cb(new AlAbrir(partes, porVolumenes, std::move(clave), &progreso, &cancelar));
+        Ptr<AlAbrir> cb(new AlAbrir(partes, porVolumenes, formato == Formato::Rar || formato == Formato::Rar5, std::move(clave),
+                                    &progreso, &cancelar));
         const UInt64 soloAlPrincipio = 0;   // la firma ya se vio al principio: no se busca más adentro
         // El tope de memoria dura mientras se abre y se lee la lista; sin él no se abre
         TopeAlAbrir tope;
@@ -1157,6 +1180,7 @@ namespace jicaro::motor7z
         {
         case Formato::Rar: return L"RAR";
         case Formato::Rar5: return L"RAR 5";
+        case Formato::Zip: return L"ZIP";
         default: return L"7z";
         }
     }

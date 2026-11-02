@@ -10,7 +10,7 @@ autores respalden Jícaro ni a Brizna Soft.
 ------------------------------------------------------------------------
 7-Zip 26.05 (7z.dll)
 ------------------------------------------------------------------------
-Jícaro usa 7z.dll, de 7-Zip, para abrir los RAR y los 7z (también con contraseña y en partes).
+Jícaro usa 7z.dll, de 7-Zip, para abrir los RAR y los 7z (también con contraseña y en partes) y los ZIP en partes.
 7z.dll va como archivo aparte, sin ningún cambio, junto a Jicaro.exe: se puede cambiar por otra versión
 compatible de 7-Zip. Jícaro solo extrae: no crea RAR ni 7z.
 

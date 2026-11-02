@@ -192,7 +192,7 @@ void VentanaPrincipal::CrearControles()
         if (m_extrayendo) return;
         wxFileDialog d(this, L"Abrir un archivo comprimido", L"", L"",
                        L"Archivos comprimidos|*.zip;*.rar;*.7z;*.tar;*.gz;*.tgz;*.bz2;*.tbz2;*.tbz;*.xz;*.txz;*.zst;*.tzst;"
-                       L"*.iso;*.cab;*.001;*.r00|Todos los archivos|*.*",
+                       L"*.iso;*.cab;*.001;*.r00;*.z01|Todos los archivos|*.*",
                        wxFD_OPEN | wxFD_FILE_MUST_EXIST);
         if (d.ShowModal() == wxID_OK) AbrirArchivo(d.GetPath().ToStdWstring());
     };

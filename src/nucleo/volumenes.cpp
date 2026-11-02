@@ -2,6 +2,7 @@
 
 #include <windows.h>
 
+#include <algorithm>
 #include <cwctype>
 #include <map>
 #include <regex>
@@ -127,7 +128,48 @@ jicaro::volumenes::Juego jicaro::volumenes::Buscar(const std::wstring& ruta)
         return j;
     }
 
-    // 2. Estilo viejo: «nombre.rar», «nombre.r00», «nombre.r01»... (después de .r99 sigue .s00)
+    // 2. ZIP en partes (WinZip, Info-ZIP, WinRAR): «nombre.z01», «nombre.z02»... y al final «nombre.zip», que trae la
+    //    lista. Solo si hay al menos una .zNN: un «nombre.zip» solo es un ZIP de siempre.
+    static const std::wregex zipParte(LR"(^(.*)\.z(\d{2,3})$)", std::regex::icase);
+    std::wstring baseZip;
+    if (std::regex_match(nombre, m, zipParte)) baseZip = m[1].str();
+    else if (nombre.size() > 4 && TerminaSinMayusculas(nombre, L".zip")) baseZip = nombre.substr(0, nombre.size() - 4);
+    if (!baseZip.empty())
+    {
+        std::map<int, std::wstring> trozos;
+        std::wstring zip;
+        for (auto& n : NombresEn(j.carpeta, baseZip + L"."))
+        {
+            if (n.size() <= baseZip.size() + 1) continue;
+            std::wstring ext = n.substr(baseZip.size() + 1);
+            if (IgualesSinMayusculas(ext, L"zip")) zip = n;
+            else if (ext.size() >= 3 && ext.size() <= 4 && towlower(ext[0]) == L'z'
+                     && std::all_of(ext.begin() + 1, ext.end(), [](wchar_t c) { return iswdigit(c) != 0; }))
+            {
+                int k = std::stoi(ext.substr(1));
+                if (k >= 1) trozos[k] = n;
+            }
+        }
+        if (!trozos.empty())
+        {
+            j.tipo = Tipo::ZipPartes;
+            j.nombreBase = Limpio(baseZip);
+            int ultima = trozos.rbegin()->first;
+            for (int k = 1; k <= ultima; k++)
+            {
+                auto it = trozos.find(k);
+                if (it != trozos.end()) j.partes.push_back(rutas::Unir(j.carpeta, it->second));
+                else j.faltan.push_back(baseZip + L".z" + ConCeros(k, 2));
+            }
+            if (zip.empty()) j.faltan.push_back(baseZip + L".zip");
+            else j.partes.push_back(rutas::Unir(j.carpeta, zip));
+            // Sin la última parte (la lista) o con un hueco no se puede leer nada: o están todas, o ninguna
+            j.seguidas = j.faltan.empty() ? j.partes.size() : 0;
+            return j;
+        }
+    }
+
+    // 3. Estilo viejo: «nombre.rar», «nombre.r00», «nombre.r01»... (después de .r99 sigue .s00)
     static const std::wregex viejo(LR"(^(.*)\.([r-z])(\d\d)$)", std::regex::icase);
     std::wstring base;
     bool esParteVieja = std::regex_match(nombre, m, viejo);
@@ -170,7 +212,7 @@ jicaro::volumenes::Juego jicaro::volumenes::Buscar(const std::wstring& ruta)
         }
     }
 
-    // 3. Trozos numerados: «nombre.7z.001», «nombre.7z.002»...
+    // 4. Trozos numerados: «nombre.7z.001», «nombre.7z.002»...
     static const std::wregex numerado(LR"(^(.*)\.(\d{3})$)");
     if (std::regex_match(nombre, m, numerado) && std::stoi(m[2].str()) >= 1)
     {
@@ -203,7 +245,7 @@ jicaro::volumenes::Juego jicaro::volumenes::Buscar(const std::wstring& ruta)
         return j;
     }
 
-    // 4. Un solo archivo
+    // 5. Un solo archivo
     j.tipo = Tipo::Uno;
     j.partes.push_back(completa);
     j.seguidas = 1;

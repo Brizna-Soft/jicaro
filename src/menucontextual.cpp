@@ -7,7 +7,7 @@ namespace
     // Los tipos de archivo que Jícaro abre. SystemFileAssociations vale para la extensión aunque otro programa la tenga
     // como predeterminada, y no cambia cuál programa abre el archivo con doble clic.
     const wchar_t* const Extensiones[] = { L".zip", L".rar", L".7z", L".tar", L".gz", L".tgz", L".bz2", L".tbz2", L".tbz",
-                                           L".xz", L".txz", L".zst", L".tzst", L".iso", L".cab", L".001" };
+                                           L".xz", L".txz", L".zst", L".tzst", L".iso", L".cab", L".001", L".z01" };
     const wchar_t* const Base = L"Software\\Classes\\SystemFileAssociations\\";
 
     struct Verbo

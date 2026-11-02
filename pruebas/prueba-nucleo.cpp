@@ -60,7 +60,7 @@ namespace
 
     bool LeerTodo(const std::wstring& ruta, std::string& datos)
     {
-        HANDLE h = CreateFileW(ruta.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+        HANDLE h = CreateFileW(rutas::Larga(ruta).c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
         if (h == INVALID_HANDLE_VALUE) return false;
         LARGE_INTEGER t;
         GetFileSizeEx(h, &t);
@@ -1454,6 +1454,228 @@ namespace
         }
     }
 }
+namespace
+{
+    std::wstring commons;   // carpeta con los ZIP en partes de Apache Commons Compress
+
+    // Todos los archivos de «a» están en «b» con el mismo contenido, y son la misma cantidad
+    bool MismosArchivos(const std::wstring& a, const std::wstring& b, std::wstring& que, const std::wstring& sub = L"")
+    {
+        WIN32_FIND_DATAW d;
+        HANDLE h = FindFirstFileW(rutas::Larga(a + sub + L"\\*").c_str(), &d);
+        if (h == INVALID_HANDLE_VALUE) return true;
+        bool ok = true;
+        do
+        {
+            std::wstring n = d.cFileName;
+            if (n == L"." || n == L"..") continue;
+            std::wstring r = sub + L"\\" + n;
+            if (d.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ok = MismosArchivos(a, b, que, r);
+            else
+            {
+                std::string x, y;
+                if (!LeerTodo(a + r, x) || !LeerTodo(b + r, y) || x != y)
+                {
+                    que = L"no coincide " + r;
+                    ok = false;
+                }
+            }
+        } while (ok && FindNextFileW(h, &d));
+        FindClose(h);
+        if (ok && sub.empty() && ContarArchivos(a) != ContarArchivos(b))
+        {
+            que = L"no es la misma cantidad de archivos";
+            ok = false;
+        }
+        return ok;
+    }
+
+    uint32_t L16(const std::string& s, size_t p) { return (uint32_t)(uint8_t)s[p] | ((uint32_t)(uint8_t)s[p + 1] << 8); }
+    uint32_t L32(const std::string& s, size_t p) { return L16(s, p) | (L16(s, p + 2) << 16); }
+    void P16(std::string& s, size_t p, uint32_t v)
+    {
+        s[p] = (char)(v & 0xFF);
+        s[p + 1] = (char)((v >> 8) & 0xFF);
+    }
+    void P32(std::string& s, size_t p, uint32_t v)
+    {
+        P16(s, p, v & 0xFFFF);
+        P16(s, p + 2, v >> 16);
+    }
+
+    // Parte un ZIP como lo hacen WinZip, Info-ZIP o WinRAR: «PK\7\8» al principio, cortes cada «tamano» bytes (nunca en
+    // medio de una cabecera), la lista entera en la última parte («base.zip») y, en la lista, la parte y la posición
+    // dentro de esa parte de cada archivo. Devuelve cuántas partes quedaron (0 si no se pudo).
+    int PartirZip(const std::wstring& zip, const std::wstring& carpeta, const std::wstring& base, size_t tamano)
+    {
+        std::string z;
+        if (!LeerTodo(zip, z) || z.size() < 22) return 0;
+        size_t eocd = z.rfind(std::string("PK\x05\x06", 4));
+        if (eocd == std::string::npos || eocd + 22 > z.size()) return 0;
+        const uint32_t entradas = L16(z, eocd + 10), cdPos = L32(z, eocd + 16);
+        if (cdPos == 0xFFFFFFFF) return 0;   // ZIP64: no hace falta para estas pruebas
+        std::string s = std::string("PK\x07\x08", 4) + z;   // todo se corre 4 bytes
+        // Las cabeceras locales, que no se cortan
+        std::vector<std::pair<size_t, size_t>> cabeceras;
+        std::vector<size_t> cd;
+        size_t p = cdPos;
+        for (uint32_t k = 0; k < entradas; k++)
+        {
+            if (p + 46 > z.size() || L32(z, p) != 0x02014b50) return 0;
+            uint32_t local = L32(z, p + 42);
+            if (local == 0xFFFFFFFF || local + 30 > z.size()) return 0;
+            cabeceras.push_back({ 4 + local, 4 + local + 30 + L16(z, local + 26) + L16(z, local + 28) });
+            cd.push_back(4 + p);
+            p += 46 + L16(z, p + 28) + L16(z, p + 30) + L16(z, p + 32);
+        }
+        const size_t inicioLista = 4 + cdPos;
+        std::vector<size_t> inicios = { 0 };
+        for (size_t c = tamano; c < inicioLista; c += tamano)
+        {
+            for (auto& [a, b] : cabeceras)
+                if (c > a && c < b) c = b;
+            if (c >= inicioLista) break;
+            if (c > inicios.back()) inicios.push_back(c);
+        }
+        inicios.push_back(inicioLista);   // la última parte: la lista y su final
+        const size_t ultima = inicios.size() - 1;
+        auto parteDe = [&](size_t pos) {
+            size_t k = 0;
+            while (k + 1 < inicios.size() && pos >= inicios[k + 1]) k++;
+            return k;
+        };
+        for (size_t k = 0; k < cabeceras.size(); k++)
+        {
+            size_t a = cabeceras[k].first, parte = parteDe(a);
+            P16(s, cd[k] + 34, (uint32_t)parte);                        // parte donde empieza
+            P32(s, cd[k] + 42, (uint32_t)(a - inicios[parte]));        // posición dentro de esa parte
+        }
+        size_t fin = 4 + eocd;
+        P16(s, fin + 4, (uint32_t)ultima);                              // esta parte
+        P16(s, fin + 6, (uint32_t)ultima);                              // la parte donde empieza la lista
+        P16(s, fin + 8, entradas);                                     // entradas en esta parte
+        P32(s, fin + 16, (uint32_t)(inicioLista - inicios[ultima]));    // la lista, dentro de esta parte
+        for (size_t k = 0; k <= ultima; k++)
+        {
+            size_t desde = inicios[k], hasta = k < ultima ? inicios[k + 1] : s.size();
+            std::wstring nombre = k < ultima ? base + L".z" + (k + 1 < 10 ? L"0" : L"") + std::to_wstring(k + 1) : base + L".zip";
+            if (!EscribirTodo(carpeta + L"\\" + nombre, s.substr(desde, hasta - desde))) return 0;
+        }
+        return (int)ultima + 1;
+    }
+
+    void PruebasDeZipEnPartes()
+    {
+        wprintf(L"\nZIP en partes (.z01, .z02... y .zip)\n");
+        // Hechos con WinRAR y con Info-ZIP (también ZIP64), de Apache Commons Compress: salen igual que sus ZIP enteros
+        if (commons.empty() || !ExisteArchivo(commons + L"\\split_zip_created_by_zip.zip"))
+            Revisar(false, L"faltan los ZIP en partes de Apache Commons Compress (los baja probar.ps1)");
+        else
+        {
+            // (carpetas de salida cortas: lo que traen ya tiene rutas largas)
+            struct { const wchar_t* partido; const wchar_t* entero; const wchar_t* corto; } reales[] = {
+                { L"split_zip_created_by_winrar", L"zip_to_compare_created_by_winrar.zip", L"zp1" },
+                { L"split_zip_created_by_zip", L"zip_to_compare_created_by_zip.zip", L"zp2" },
+                { L"split_zip_created_by_zip_zip64", L"zip_to_compare_created_by_zip_zip64.zip", L"zp3" },
+            };
+            for (auto& z : reales)
+            {
+                auto juego = volumenes::Buscar(commons + L"\\" + z.partido + L".z02");
+                std::wstring d = Carpeta(std::wstring(L"salida\\") + z.corto);
+                auto r = ExtraerSimple(commons + L"\\" + z.partido + L".z02", d);
+                std::wstring dEntero = Carpeta(std::wstring(L"salida\\") + z.corto + L"e");
+                auto re = ExtraerSimple(commons + L"\\" + z.entero, dEntero);
+                std::wstring que;
+                bool iguales = MismosArchivos(dEntero, d, que);
+                Revisar(juego.tipo == volumenes::Tipo::ZipPartes && juego.partes.size() == 3 && juego.faltan.empty()
+                            && r.estado == jicaro::Estado::Bien && r.archivos > 0 && r.omitidas.empty() && re.archivos == r.archivos && iguales,
+                        std::wstring(z.partido) + L" (.z01, .z02 y .zip), abierto desde la .z02: sale igual que el ZIP entero (" +
+                            std::to_wstring(r.archivos) + L" archivos) " + (iguales ? L"" : que + L" ") + Texto(r));
+            }
+            Progreso pr;
+            std::atomic<bool> no{ false };
+            auto juego = volumenes::Buscar(commons + L"\\split_zip_created_by_zip.zip");
+            auto lista = Listar(juego.partes, L"", pr, no);
+            Revisar(lista.estado == jicaro::Estado::Bien && lista.formato == L"ZIP" && !lista.entradas.empty(),
+                    L"listar un ZIP en partes (" + std::to_wstring(lista.entradas.size()) + L" entradas, " + lista.formato + L")");
+        }
+
+        // Los propios, partidos aquí (sin contraseña, con ZipCrypto y con AES-256)
+        std::wstring c = Carpeta(L"zip-partes");
+        int n1 = PartirZip(trabajo + L"\\propios\\propio.zip", c, L"partido", 100000);
+        int n2 = PartirZip(trabajo + L"\\propios\\clave-zipcrypto.zip", c, L"zipcrypto", 100000);
+        int n3 = PartirZip(trabajo + L"\\propios\\clave-aes.zip", c, L"aes", 100000);
+        Revisar(n1 >= 3 && n2 >= 3 && n3 >= 3, L"partir los ZIP propios (" + std::to_wstring(n1) + L", " + std::to_wstring(n2) + L" y " +
+                                                    std::to_wstring(n3) + L" partes)");
+        {
+            std::wstring d = Carpeta(L"salida\\partido");
+            auto r = ExtraerSimple(c + L"\\partido.z02", d);
+            std::wstring que;
+            bool ok = r.estado == jicaro::Estado::Bien && Coincide(d, Esperado(), que);
+            Revisar(ok, L"ZIP propio en partes, abierto desde la .z02 " + (ok ? L"" : Texto(r) + L" " + que));
+        }
+        {
+            Prueba p;
+            Claves(p, { L"mala", L"clave ñ" });
+            std::wstring d = Carpeta(L"salida\\zipcrypto-partes");
+            auto r = Extraer(p, c + L"\\zipcrypto.zip", d);
+            std::wstring que;
+            bool ok = r.estado == jicaro::Estado::Bien && Coincide(d, Esperado(), que) && p.pidioContrasena == 2;
+            Revisar(ok, L"ZIP en partes con ZipCrypto (clave con eñe): avisa que la mala no sirve y sale con la buena " + Texto(r) + L" " + que);
+        }
+        {
+            Prueba p;
+            p.op.contrasena = L"secreta";
+            std::wstring d = Carpeta(L"salida\\aes-partes");
+            auto r = Extraer(p, c + L"\\aes.z01", d);
+            std::wstring que;
+            bool ok = r.estado == jicaro::Estado::Bien && Coincide(d, Esperado(), que) && p.pidioContrasena == 0;
+            Revisar(ok, L"ZIP en partes con AES-256 y la contraseña dada de antemano " + Texto(r) + L" " + que);
+        }
+        {
+            Prueba p;
+            p.op.contrasena = L"mala";
+            std::wstring d = Carpeta(L"salida\\aes-partes-mala");
+            auto r = Extraer(p, c + L"\\aes.zip", d);
+            // El archivo vacío no va cifrado y sale igual; los otros 3 no, y no quedan restos
+            Revisar(r.clavesMalas == 3 && r.archivos <= 1 && !ExisteArchivo(d + L"\\hola.txt") && !ExisteArchivo(d + L"\\datos.bin")
+                        && ContarArchivos(d) == r.archivos,
+                    L"ZIP en partes con AES-256 y una mala: 3 no salen («la contraseña no sirvió»), sin restos " + Texto(r));
+        }
+        // Falta una parte en medio, y falta la última (la lista)
+        {
+            std::wstring h = Carpeta(L"zip-hueco");
+            for (int k = 1; k < n1; k++)
+                if (k != 2) CopyFileW((c + L"\\partido.z0" + std::to_wstring(k)).c_str(), (h + L"\\hueco.z0" + std::to_wstring(k)).c_str(), FALSE);
+            CopyFileW((c + L"\\partido.zip").c_str(), (h + L"\\hueco.zip").c_str(), FALSE);
+            auto juego = volumenes::Buscar(h + L"\\hueco.zip");
+            Revisar(juego.tipo == volumenes::Tipo::ZipPartes && juego.faltan.size() == 1 && juego.faltan[0] == L"hueco.z02" && juego.seguidas == 0,
+                    L"avisa que falta hueco.z02");
+            auto r = ExtraerSimple(h + L"\\hueco.zip", Carpeta(L"salida\\zip-hueco"));
+            Revisar(r.estado == jicaro::Estado::FaltaParte && r.mensaje.find(L"hueco.z02") != std::wstring::npos,
+                    L"extraer sin la .z02 dice que falta hueco.z02 " + Texto(r));
+            std::wstring u = Carpeta(L"zip-sin-lista");
+            for (int k = 1; k < n1; k++)
+                CopyFileW((c + L"\\partido.z0" + std::to_wstring(k)).c_str(), (u + L"\\sinlista.z0" + std::to_wstring(k)).c_str(), FALSE);
+            juego = volumenes::Buscar(u + L"\\sinlista.z01");
+            Revisar(juego.tipo == volumenes::Tipo::ZipPartes && juego.faltan.size() == 1 && juego.faltan[0] == L"sinlista.zip",
+                    L"avisa que falta sinlista.zip (la parte que trae la lista)");
+        }
+        // Sin 7z.dll no se pueden abrir, y Jícaro lo dice
+        {
+            pruebas::sinMotor7z = true;
+            auto r = ExtraerSimple(c + L"\\partido.zip", Carpeta(L"salida\\partido-sin-motor"));
+            pruebas::sinMotor7z = false;
+            Revisar(r.estado == jicaro::Estado::Error && r.mensaje.find(L"7z.dll") != std::wstring::npos && r.archivos == 0,
+                    L"sin 7z.dll avisa que hace falta para los ZIP en partes " + Texto(r));
+        }
+        // Un ZIP de siempre sigue con libarchive (y no se toma por partido)
+        {
+            auto juego = volumenes::Buscar(trabajo + L"\\propios\\propio.zip");
+            Revisar(juego.tipo == volumenes::Tipo::Uno, L"un ZIP solo, sin .z01, no es un ZIP en partes");
+        }
+    }
+}
 int wmain(int argc, wchar_t** argv)
 {
     _setmode(_fileno(stdout), _O_U8TEXT);
@@ -1491,6 +1713,7 @@ int wmain(int argc, wchar_t** argv)
     suite = RutaCompleta(argv[1]);
     trabajo = RutaCompleta(argv[2]);
     if (argc > 3) sharp = RutaCompleta(argv[3]);
+    if (argc > 4) commons = RutaCompleta(argv[4]);
     if (ExisteCarpeta(trabajo))
     {
         wprintf(L"La carpeta de trabajo ya existe: usa una nueva.\n");
@@ -1503,6 +1726,7 @@ int wmain(int argc, wchar_t** argv)
     PruebasDeContrasena();
     PruebasRarY7z();
     PruebasDeClavesRarY7z();
+    PruebasDeZipEnPartes();
     PruebasMalas();
     PruebasDeBomba();
     PruebasSiExiste();
