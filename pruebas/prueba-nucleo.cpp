@@ -1673,6 +1673,23 @@ namespace
         {
             auto juego = volumenes::Buscar(trabajo + L"\\propios\\propio.zip");
             Revisar(juego.tipo == volumenes::Tipo::Uno, L"un ZIP solo, sin .z01, no es un ZIP en partes");
+            // Con una «.z02» ajena al lado: su registro final dice que es de una sola parte
+            std::wstring a = Carpeta(L"zip-ajeno");
+            CopyFileW((trabajo + L"\\propios\\propio.zip").c_str(), (a + L"\\comun.zip").c_str(), FALSE);
+            EscribirTodo(a + L"\\comun.z02", "esto no es parte de comun.zip");
+            juego = volumenes::Buscar(a + L"\\comun.zip");
+            std::wstring d = Carpeta(L"salida\\zip-ajeno");
+            auto r = ExtraerSimple(a + L"\\comun.zip", d);
+            std::wstring que;
+            Revisar(juego.tipo == volumenes::Tipo::Uno && juego.faltan.empty() && r.estado == jicaro::Estado::Bien && Coincide(d, Esperado(), que),
+                    L"un ZIP común con una .z02 ajena al lado se abre igual " + Texto(r) + L" " + que);
+            // Solo el .zip de un ZIP en partes: su registro final dice cuántas partes faltan
+            std::wstring s = Carpeta(L"zip-solo-final");
+            CopyFileW((c + L"\\partido.zip").c_str(), (s + L"\\final.zip").c_str(), FALSE);
+            juego = volumenes::Buscar(s + L"\\final.zip");
+            Revisar(juego.tipo == volumenes::Tipo::ZipPartes && (int)juego.faltan.size() == n1 - 1 && juego.faltan[0] == L"final.z01"
+                        && juego.seguidas == 0,
+                    L"solo el .zip de un ZIP en partes: avisa que faltan las " + std::to_wstring(n1 - 1) + L" partes anteriores");
         }
     }
 }

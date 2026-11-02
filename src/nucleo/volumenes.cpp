@@ -6,6 +6,7 @@
 #include <cwctype>
 #include <map>
 #include <regex>
+#include <vector>
 
 #include "comun.hpp"
 #include "rutas.hpp"
@@ -58,6 +59,46 @@ namespace
                 return Limpio(nombre.substr(0, nombre.size() - e.size()) + nuevo);
         }
         return Limpio(nombre);
+    }
+
+    // ¿En cuántas partes se cortó este ZIP? Lo dice el registro final del ZIP (el número de la parte que lo trae; en un
+    // ZIP64, el total de partes). 0: es un ZIP de una sola parte; -1: no se pudo leer (no parece un ZIP).
+    int UltimaParteDelZip(const std::wstring& ruta)
+    {
+        HANDLE h = CreateFileW(jicaro::rutas::Larga(ruta).c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                               nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (h == INVALID_HANDLE_VALUE) return -1;
+        int r = -1;
+        LARGE_INTEGER tam{};
+        if (GetFileSizeEx(h, &tam) && tam.QuadPart >= 22)
+        {
+            // El registro final (22 bytes y un comentario de hasta 65535) está al final; antes puede ir el de ZIP64 (20)
+            const int64_t leer = std::min<int64_t>(tam.QuadPart, 22 + 65535 + 20);
+            std::vector<unsigned char> b((size_t)leer);
+            LARGE_INTEGER desde;
+            desde.QuadPart = tam.QuadPart - leer;
+            DWORD n = 0;
+            if (SetFilePointerEx(h, desde, nullptr, FILE_BEGIN) && ReadFile(h, b.data(), (DWORD)leer, &n, nullptr) && n == (DWORD)leer)
+            {
+                auto l16 = [&](size_t p) { return (uint32_t)b[p] | ((uint32_t)b[p + 1] << 8); };
+                auto l32 = [&](size_t p) { return l16(p) | (l16(p + 2) << 16); };
+                for (size_t p = b.size() - 22 + 1; p-- > 0;)
+                {
+                    if (b[p] != 'P' || b[p + 1] != 'K' || b[p + 2] != 5 || b[p + 3] != 6) continue;
+                    if (p + 22 + l16(p + 20) != b.size()) continue;   // el comentario tiene que llegar justo al final
+                    uint32_t estaParte = l16(p + 4);
+                    if (estaParte == 0xFFFF && p >= 20 && b[p - 20] == 'P' && b[p - 19] == 'K' && b[p - 18] == 6 && b[p - 17] == 7)
+                    {
+                        uint32_t total = l32(p - 20 + 16);   // ZIP64: el total de partes
+                        r = total >= 1 && total <= 100000 ? (int)total - 1 : -1;
+                    }
+                    else r = estaParte <= 100000 ? (int)estaParte : -1;
+                    break;
+                }
+            }
+        }
+        CloseHandle(h);
+        return r;
     }
 
     // Parte vieja número k: 0 = .rar, 1 = .r00, ... 100 = .r99, 101 = .s00 ...
@@ -150,11 +191,15 @@ jicaro::volumenes::Juego jicaro::volumenes::Buscar(const std::wstring& ruta)
                 if (k >= 1) trozos[k] = n;
             }
         }
-        if (!trozos.empty())
+        // Si está el .zip, su registro final dice si de verdad es un ZIP en partes y cuántas son: un «fotos.z02» ajeno al
+        // lado de un «fotos.zip» común no lo convierte en partido, y si solo está el .zip se sabe qué partes faltan
+        int ultimaSegunZip = zip.empty() ? -1 : UltimaParteDelZip(rutas::Unir(j.carpeta, zip));
+        if (ultimaSegunZip == 0) trozos.clear();
+        if (!trozos.empty() || ultimaSegunZip > 0)
         {
             j.tipo = Tipo::ZipPartes;
             j.nombreBase = Limpio(baseZip);
-            int ultima = trozos.rbegin()->first;
+            int ultima = ultimaSegunZip > 0 ? ultimaSegunZip : trozos.rbegin()->first;
             for (int k = 1; k <= ultima; k++)
             {
                 auto it = trozos.find(k);

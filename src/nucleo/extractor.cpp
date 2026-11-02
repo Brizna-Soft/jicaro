@@ -1577,14 +1577,13 @@ namespace
     {
         std::vector<std::wstring> r;
         if (std::all_of(clave.begin(), clave.end(), [](wchar_t c) { return c < 0x80; })) return r;
+        // Todo el bloque de una vez (en páginas de varios bytes, como la japonesa, un byte suelto no es un carácter), y
+        // solo si al volver da exactamente los mismos bytes
         auto disfrazar = [](const std::string& bytes) -> std::optional<std::wstring> {
-            std::wstring w;
-            for (unsigned char b : bytes)
-            {
-                wchar_t c = 0;
-                if (MultiByteToWideChar(CP_ACP, MB_ERR_INVALID_CHARS, reinterpret_cast<const char*>(&b), 1, &c, 1) != 1) return std::nullopt;
-                w.push_back(c);
-            }
+            int largo = MultiByteToWideChar(CP_ACP, MB_ERR_INVALID_CHARS, bytes.data(), (int)bytes.size(), nullptr, 0);
+            if (largo <= 0) return std::nullopt;
+            std::wstring w((size_t)largo, L'\0');
+            if (MultiByteToWideChar(CP_ACP, MB_ERR_INVALID_CHARS, bytes.data(), (int)bytes.size(), w.data(), largo) != largo) return std::nullopt;
             BOOL perdio = FALSE;
             int n = WideCharToMultiByte(CP_ACP, WC_NO_BEST_FIT_CHARS, w.data(), (int)w.size(), nullptr, 0, nullptr, &perdio);
             if (n != (int)bytes.size() || perdio) return std::nullopt;
