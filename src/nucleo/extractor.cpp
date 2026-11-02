@@ -1143,6 +1143,14 @@ namespace
             }
             if (m_cancelar) return false;
             if (tam == 0) continue;
+            // Nada fuera de lo que anuncia el archivo: ni antes del principio, ni más allá del tamaño anunciado (como
+            // hacía el escritor de libarchive). Si no cuadra, está dañado y se quita.
+            if (desde < 0 || (int64_t)tam < 0 || desde > INT64_MAX - (int64_t)tam
+                || (logico >= 0 && (desde > logico || (int64_t)tam > logico - desde)))
+            {
+                Omitir(cruda, L"está dañado: trae más datos que el tamaño que anuncia", Tipo::Falla);
+                return false;
+            }
             int64_t nuevoHasta = std::max<int64_t>(hasta, desde + (int64_t)tam);
             int64_t crecimiento = nuevoHasta - hasta;   // datos y el hueco que haya antes de ellos
             hasta = nuevoHasta;
@@ -1630,6 +1638,7 @@ namespace
             m_completa = completa;
             m_relativa = *relativa;
             m_escrito = 0;
+            m_demasiado = false;
             m_fallaEscritura = false;
             return motor7z::Paso::Escribir;
         }
@@ -1638,7 +1647,13 @@ namespace
         {
             if (!m_activo) return true;
             if (x.m_cancelar) return false;
-            if (m_fallaEscritura) return true;   // lo que falta de este archivo se descarta
+            if (m_fallaEscritura || m_demasiado) return true;   // lo que falta de este archivo se descarta
+            // Más datos que el tamaño que anuncia: no se escriben (al terminar, se quita por dañado)
+            if (m_item->tamano >= 0 && (int64_t)tamano > m_item->tamano - m_escrito)
+            {
+                m_demasiado = true;
+                return true;
+            }
             if (!m_archivo.Escribir(datos, tamano, m_escrito))
             {
                 int64_t libre = EspacioLibre(x.m_destino);
@@ -1658,7 +1673,7 @@ namespace
         {
             if (!m_activo) return;
             // Tiene que llegar justo el tamaño que anuncia el archivo: nada crece a escondidas de los topes
-            const bool tamanoBien = m_item->tamano < 0 || m_escrito == m_item->tamano;
+            const bool tamanoBien = !m_demasiado && (m_item->tamano < 0 || m_escrito == m_item->tamano);
             if (resultado == motor7z::kBien && !m_fallaEscritura && tamanoBien)
             {
                 const auto& it = *m_item;
@@ -1777,7 +1792,7 @@ namespace
         uint32_t m_indice = 0;
         const motor7z::Item* m_item = nullptr;
         ArchivoPropio m_archivo;   // el archivo que se está escribiendo (lo creó Jícaro)
-        bool m_cifrada = false, m_activo = false, m_fallaEscritura = false;
+        bool m_cifrada = false, m_activo = false, m_fallaEscritura = false, m_demasiado = false;
         const bool m_faltaVolumen;
         int64_t m_escrito = 0;
     };
