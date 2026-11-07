@@ -225,8 +225,10 @@ void VentanaPrincipal::CrearControles()
 
 void VentanaPrincipal::PonerAviso(const wxString& texto, bool grave)
 {
-    m_aviso->SetLabel(texto);
-    m_aviso->SetForegroundColour(grave ? wxColour(205, 90, 20) : wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOWTEXT));
+    // Los avisos graves llevan «Ojo:» además del color, y el naranja se lee bien en claro (5,6:1) y en oscuro
+    m_aviso->SetLabel(grave && !texto.empty() ? L"Ojo: " + texto : texto);
+    wxColour naranja = wxSystemSettings::GetAppearance().IsDark() ? wxColour(255, 170, 100) : wxColour(170, 70, 0);
+    m_aviso->SetForegroundColour(grave ? naranja : wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOWTEXT));
     m_aviso->Wrap(-1);
     m_aviso->Wrap(std::max(FromDIP(300), m_panel->GetClientSize().GetWidth() - FromDIP(20)));
     m_aviso->Show(!texto.empty());

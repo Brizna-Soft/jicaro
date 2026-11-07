@@ -417,7 +417,7 @@ namespace
         if (tiene("truncated") || tiene("premature") || tiene("unexpected end") || tiene("eof"))
             return L" Parece incompleto (¿se terminó de bajar?).";
         if (tiene("crc") || tiene("checksum"))
-            return L" Los datos no coinciden con su suma de control: está dañado, o la contraseña no es la correcta.";
+            return L" Sus datos no son los que deberían ser: el archivo está dañado o la contraseña no es la correcta.";
         if (tiene("unsupported") || tiene("not supported"))
             return L" Usa algo que Jícaro todavía no sabe leer.";
         if (tiene("memory"))
@@ -1129,7 +1129,7 @@ namespace
                     if (!Controlar(logico - hasta)) return false;
                     if (!destino.Agrandar(logico))
                     {
-                        Omitir(cruda, L"no se pudo escribir en el disco", Tipo::Falla);
+                        Omitir(cruda, L"no se pudo escribir en el disco: puede faltar espacio o permiso en esa carpeta, o lo bloqueó el antivirus. Prueba extraer en Documentos", Tipo::Falla);
                         return false;
                     }
                 }
@@ -1158,7 +1158,7 @@ namespace
             {
                 int64_t libre = EspacioLibre(m_destino);
                 if (libre >= 0 && libre < (64LL << 20)) m_sinEspacio = true;
-                else Omitir(cruda, L"no se pudo escribir en el disco", Tipo::Falla);
+                else Omitir(cruda, L"no se pudo escribir en el disco: puede faltar espacio o permiso en esa carpeta, o lo bloqueó el antivirus. Prueba extraer en Documentos", Tipo::Falla);
                 return false;
             }
             if (crecimiento > 0 && !Controlar(crecimiento)) return false;
@@ -1327,7 +1327,7 @@ namespace
 
             if (EsEnlaceSimbolico(e))
             {
-                Omitir(cruda, L"es un enlace simbólico; Jícaro no crea enlaces por seguridad");
+                Omitir(cruda, L"es un enlace a otro lugar del disco; Jícaro no crea enlaces, por seguridad");
                 continue;
             }
             int tipo = archive_entry_filetype(e);
@@ -1781,7 +1781,7 @@ namespace
                 x.Omitir(cruda, L"está incompleto (¿falta una parte o no se terminó de bajar?)", Tipo::Falla);
                 break;
             case motor7z::kMetodoDesconocido: metodoDesconocido.push_back(indice); break;
-            default: x.Omitir(cruda, L"está dañado: los datos no coinciden con su suma de control", Tipo::Falla); break;
+            default: x.Omitir(cruda, L"está dañado: sus datos no son los que deberían ser", Tipo::Falla); break;
             }
         }
 
@@ -1876,12 +1876,12 @@ namespace
             }
             if (it.alterno)
             {
-                Omitir(cruda, L"es un flujo alterno de NTFS; Jícaro no los crea por seguridad");
+                Omitir(cruda, L"es una parte escondida de otro archivo (flujo alterno); Jícaro no las crea, por seguridad");
                 continue;
             }
             if (it.simbolico)
             {
-                Omitir(cruda, L"es un enlace simbólico; Jícaro no crea enlaces por seguridad");
+                Omitir(cruda, L"es un enlace a otro lugar del disco; Jícaro no crea enlaces, por seguridad");
                 continue;
             }
             if (it.especial)

@@ -29,7 +29,8 @@ Jícaro $version - descompresor gratis de Brizna Soft
 3. Arrastra un archivo comprimido a la ventana, o pulsa "Abrir...". Con una parte de un RAR en varias partes
    (por ejemplo juego.part03.rar) abre el juego completo y te avisa si falta alguna parte.
 4. Para tener "Extraer aquí" en el clic derecho: pulsa "Ajustes" y marca la casilla. En Windows 11 sale en
-   "Mostrar más opciones". Antes de borrar Jícaro, desmarca esa casilla.
+   "Mostrar más opciones". Antes de borrar Jícaro, desmarca esa casilla o abre "Quitar-clic-derecho.bat".
+5. Jícaro solo extrae. Para comprimir, usa el de Windows: clic derecho > Enviar a > Carpeta comprimida.
 
 Abre: ZIP, RAR, RAR 5 y 7z (también con contraseña y en varias partes), TAR, GZ, BZ2, XZ, ZST, ISO y CAB.
 Si un archivo tiene contraseña, Jícaro te la pide; si no sirve, te avisa y te la pide otra vez. Jícaro solo extrae:
@@ -42,6 +43,11 @@ Ayuda y reportes de problemas: https://github.com/Brizna-Soft/jicaro
 Sin publicidad, sin virus y sin recoger tus datos. Licencia MIT.
 "@
 [System.IO.File]::WriteAllText((Join-Path $temporal 'LEEME.txt'), $leeme, (New-Object System.Text.UTF8Encoding($true)))
+# Para quien borra Jícaro sin desmarcar el clic derecho: quita «Extraer aquí» y lo demás que puso Jícaro.
+# Solo letras sin acentos: cmd lee los .bat con la página de códigos de la consola.
+$bat = "@echo off`r`nrem Quita del clic derecho lo que puso Jicaro (Extraer aqui). No borra nada mas.`r`n" +
+       "`"%~dp0Jicaro.exe`" --quitar-menu`r`n"
+[System.IO.File]::WriteAllText((Join-Path $temporal 'Quitar-clic-derecho.bat'), $bat, (New-Object System.Text.ASCIIEncoding))
 
 $zip = Join-Path $publicar "$nombre.zip"
 if (Test-Path $zip) { Remove-Item -Force $zip }

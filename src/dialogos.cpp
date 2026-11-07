@@ -159,8 +159,9 @@ jicaro::Decision dialogos::PreguntarSiExiste(wxWindow* padre, const std::wstring
 bool dialogos::PreguntarBomba(wxWindow* padre, const std::wstring& motivo)
 {
     wxMessageDialog d(padre,
-                      motivo + L"\n\nPuede ser una «bomba de descompresión»: un archivo hecho para llenar el disco. "
-                               L"Si no esperabas algo tan grande, detén la extracción.\n\n¿Seguir extrayendo?",
+                      motivo + L"\n\nEste archivo es mucho más grande de lo normal al abrirlo. Puede ser un archivo trampa "
+                               L"hecho para llenar el disco. Si no esperabas algo tan grande, pulsa «Detener».\n\n"
+                               L"¿Seguir extrayendo?",
                       L"¿Seguir extrayendo?", wxYES_NO | wxNO_DEFAULT | wxICON_WARNING);
     d.SetYesNoLabels(L"Seguir", L"Detener");
     return d.ShowModal() == wxID_YES;
@@ -284,6 +285,7 @@ wxString dialogos::TextoResumen(const jicaro::Resumen& r, const std::wstring& de
     {
         t = r.mensaje;
         if (r.archivos > 0) t += wxString::Format(L"\nAlcanzaron a salir %s archivos.", TextoNumero(r.archivos));
+        if (r.estado == jicaro::Estado::Error) t += wxString(L"\n") + ayuda::SiVuelveAPasar;
     }
     if (r.zona && r.marcados > 0)
         t += L"\n\nLo extraído quedó marcado como bajado de internet, igual que el archivo comprimido: Windows te avisará "
