@@ -22,9 +22,7 @@ jobs:
     runs-on: windows-2022
     timeout-minutes: 120
     permissions:
-      contents: write   # solo se usa para crear la versión cuando hay etiqueta
-      id-token: write   # para la atestación de origen del .zip (solo con etiqueta)
-      attestations: write
+      contents: read
     env:
       VCPKG_ROOT: ${{ github.workspace }}\vendor\vcpkg
       VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}\vendor\vcpkg-binarios
@@ -78,18 +76,34 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: jicaro
-          path: publicar/*.zip*
+          path: |
+            publicar/*.zip*
+            build/7zip/7z*-src.7z
+
+  # Publicar va aparte: solo este trabajo, y solo con una etiqueta v*, puede crear la versión y su atestación
+  publicar:
+    name: Publicar la versión
+    needs: compilar
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: windows-2022
+    permissions:
+      contents: write       # crear la versión
+      id-token: write       # atestación de origen del .zip
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: jicaro
+          path: .
 
       # Prueba pública de que el .zip lo armó GitHub con este código. Se comprueba con:
       #   gh attestation verify <archivo.zip> --repo Brizna-Soft/jicaro
       - name: Atestación de origen del .zip
-        if: startsWith(github.ref, 'refs/tags/v')
         uses: actions/attest-build-provenance@v4
         with:
           subject-path: publicar/Jicaro-*.zip
 
       - name: Publicar la versión
-        if: startsWith(github.ref, 'refs/tags/v')
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
@@ -107,4 +121,4 @@ jobs:
           misma versión, va aquí abajo (``7z*-src.7z``) y en https://www.7-zip.org.
           "@
           $archivos = @((Get-ChildItem publicar -Filter 'Jicaro-*').FullName) + @((Get-ChildItem build\7zip -Filter '7z*-src.7z').FullName)
-          gh release create "${{ github.ref_name }}" $archivos --title "Jícaro $version" --notes $notas
+          gh release create "${{ github.ref_name }}" $archivos --repo "${{ github.repository }}" --title "Jícaro $version" --notes $notas

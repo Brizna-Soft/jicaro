@@ -68,7 +68,9 @@ endforeach()
 # --- Pruebas con CTest: «ctest --test-dir build -C Release --output-on-failure» corre pruebas/probar.ps1, que prepara
 #     los archivos de prueba (necesita VCPKG_ROOT, como compilar.ps1) y corre prueba-rutas y prueba-nucleo ---
 enable_testing()
+# Con PowerShell 7 si está (como en GitHub; Windows PowerShell no carga sus módulos si lo abre PowerShell 7)
+find_program(POWERSHELL_PRUEBAS NAMES pwsh powershell)
 add_test(NAME rutas-y-nucleo
-    COMMAND powershell -NoProfile -ExecutionPolicy Bypass -File "${CMAKE_CURRENT_SOURCE_DIR}/pruebas/probar.ps1"
+    COMMAND "${POWERSHELL_PRUEBAS}" -NoProfile -ExecutionPolicy Bypass -File "${CMAKE_CURRENT_SOURCE_DIR}/pruebas/probar.ps1"
             -Build "$<TARGET_FILE_DIR:prueba-nucleo>"
     WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
