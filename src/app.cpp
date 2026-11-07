@@ -112,6 +112,7 @@ public:
     int OnExit() override
     {
         jicaro::hilos::Cerrar();   // los hilos que terminen tarde ya no mandan nada a la aplicación
+        ayuda::Cerrar();           // tampoco «Buscar actualización»
         return wxApp::OnExit();
     }
 

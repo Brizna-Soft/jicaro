@@ -133,7 +133,13 @@ void VentanaPrincipal::CrearControles()
     archivo->Append(wxID_EXIT, L"&Salir");
     auto* barra = new wxMenuBar();
     barra->Append(archivo, L"&Archivo");
-    barra->Append(ayuda::CrearMenu(this, Descripcion), L"A&yuda");
+    ayuda::Opciones datosAyuda;
+    datosAyuda.descripcion = Descripcion;
+    datosAyuda.creditos = L"Usa libarchive (licencia BSD), wxWidgets y otras bibliotecas libres, y 7z.dll de 7-Zip (de Igor "
+                        L"Pavlov, licencia GNU LGPL; su código está en www.7-zip.org). Sus avisos de licencia están en el "
+                        L"archivo AVISOS-DE-TERCEROS.txt, junto al programa.";
+    datosAyuda.carpetaDeRegistros = jicaro::CarpetaDatos();
+    ayuda::AgregarMenu(barra, this, datosAyuda);
     SetMenuBar(barra);
 
     m_panel = new wxPanel(this);
