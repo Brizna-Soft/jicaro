@@ -87,5 +87,10 @@ $trabajo = Join-Path $locales ('trabajo-' + (Get-Date -Format 'yyyyMMdd-HHmmss')
 & (Join-Path $Build 'prueba-nucleo.exe') $suite $trabajo $sharp $commons
 $fallas = $LASTEXITCODE
 if ($fallas -ne 0) { throw "prueba-nucleo: $fallas fallas (los archivos quedaron en $trabajo)" }
-Remove-Item -Recurse -Force $trabajo
+# Las pruebas dejan rutas más largas que 260 letras: si Remove-Item no puede, se borra con la forma larga (\\?\)
+try { Remove-Item -Recurse -Force $trabajo -ErrorAction Stop }
+catch {
+    & cmd.exe /c "rmdir /s /q `"\\?\$trabajo`""
+    if (Test-Path $trabajo) { Write-Warning "No se pudo borrar $trabajo (las pruebas sí pasaron)" }
+}
 Write-Host 'Pruebas sin ventana: todo bien.' -ForegroundColor Green

@@ -64,3 +64,11 @@ foreach(prueba prueba-rutas prueba-nucleo)
     target_compile_options(${prueba} PRIVATE $<$<COMPILE_LANGUAGE:CXX>:${OPCIONES_CXX}>)
     target_link_libraries(${prueba} PRIVATE jicaro-nucleo-pruebas)
 endforeach()
+
+# --- Pruebas con CTest: «ctest --test-dir build -C Release --output-on-failure» corre pruebas/probar.ps1, que prepara
+#     los archivos de prueba (necesita VCPKG_ROOT, como compilar.ps1) y corre prueba-rutas y prueba-nucleo ---
+enable_testing()
+add_test(NAME rutas-y-nucleo
+    COMMAND powershell -NoProfile -ExecutionPolicy Bypass -File "${CMAKE_CURRENT_SOURCE_DIR}/pruebas/probar.ps1"
+            -Build "$<TARGET_FILE_DIR:prueba-nucleo>"
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")

@@ -23,6 +23,8 @@ jobs:
     timeout-minutes: 120
     permissions:
       contents: write   # solo se usa para crear la versión cuando hay etiqueta
+      id-token: write   # para la atestación de origen del .zip (solo con etiqueta)
+      attestations: write
     env:
       VCPKG_ROOT: ${{ github.workspace }}\vendor\vcpkg
       VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}\vendor\vcpkg-binarios
@@ -63,9 +65,11 @@ jobs:
 
       # Rutas peligrosas, partes, contraseñas (también RAR y 7z con 7z.dll), enlaces, bomba chica y la marca de la Web,
       # con archivos de verdad
-      - name: Pruebas sin ventana
+      - name: Pruebas sin ventana (CTest, corre pruebas/probar.ps1)
         shell: pwsh
-        run: ./pruebas/probar.ps1
+        run: |
+          ctest --test-dir build -C Release --output-on-failure
+          if ($LASTEXITCODE -ne 0) { throw 'Fallaron pruebas' }
 
       - name: Empaquetar
         shell: pwsh
@@ -75,6 +79,14 @@ jobs:
         with:
           name: jicaro
           path: publicar/*.zip*
+
+      # Prueba pública de que el .zip lo armó GitHub con este código. Se comprueba con:
+      #   gh attestation verify <archivo.zip> --repo Brizna-Soft/jicaro
+      - name: Atestación de origen del .zip
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: publicar/Jicaro-*.zip
 
       - name: Publicar la versión
         if: startsWith(github.ref, 'refs/tags/v')
