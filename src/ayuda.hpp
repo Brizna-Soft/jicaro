@@ -21,6 +21,7 @@ namespace ayuda
         wxString descripcion;            // qué hace el programa, en una o dos frases (sale en «Acerca de»)
         wxString creditos;               // opcional: bibliotecas con aviso propio (sale en «Acerca de»)
         std::wstring carpetaDeRegistros; // opcional: carpeta donde el programa escribe registro.txt
+        bool conF1 = true;               // false si el programa deja usar F1 para otra cosa (Chachalaca)
     };
 
     // Agrega el menú «Ayuda» al final de la barra y conecta sus opciones a la ventana:

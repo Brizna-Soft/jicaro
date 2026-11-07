@@ -88,6 +88,31 @@ namespace
         return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY) && !(a & FILE_ATTRIBUTE_REPARSE_POINT);
     }
 
+    // Un trozo de dirección que viene de la respuesta de GitHub (la etiqueta o el nombre del .zip): solo letras,
+    // números y «._+-», sin empezar por punto. Así no hay «..», «/», «%» ni nada que lleve fuera del repositorio.
+    bool EsTrozoSeguro(const std::string& s)
+    {
+        if (s.empty() || s.size() > 200 || s[0] == '.') return false;
+        for (unsigned char c : s)
+            if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '.' || c == '_'
+                  || c == '+' || c == '-'))
+                return false;
+        return true;
+    }
+
+    // ¿Sigue abierto el programa? Las respuestas que llegan durante el cierre no muestran nada.
+    bool SigueAbierta(int idVentana, wxWindow*& padre)
+    {
+        {
+            std::lock_guard<std::mutex> g(candado);
+            if (!abierta) return false;
+        }
+        if (!wxTheApp || !wxTheApp->IsMainLoopRunning()) return false;
+        padre = idVentana != wxID_ANY ? wxWindow::FindWindowById(idVentana) : nullptr;
+        if (idVentana != wxID_ANY && (!padre || padre->IsBeingDeleted())) return false;   // la ventana ya se cerró
+        return true;
+    }
+
     // Para las direcciones: deja letras, números y «-._~»; lo demás va como %XX (en UTF-8)
     wxString Codificar(const wxString& texto)
     {
@@ -258,18 +283,20 @@ void ayuda::BuscarActualizacion(wxWindow* padre)
         {
             auto j = nlohmann::json::parse(cuerpo);
             etiqueta = j.value("tag_name", "");
-            pagina = j.value("html_url", "");
-            // El .zip del programa: «Nombre-versión-x64.zip», bajado de las releases de su propio repositorio
+            if (!EsTrozoSeguro(etiqueta)) etiqueta.clear();
+            // Las direcciones se arman aquí con la etiqueta y el nombre ya revisados; no se usan las que trae la respuesta
+            std::string base = "https://github.com/" + std::string(APP_REPO) + "/releases/";
+            if (!etiqueta.empty()) pagina = base + "tag/" + etiqueta;
+            // El .zip del programa: «Nombre-versión-x64.zip», de las releases de su propio repositorio
             std::string inicio = std::string(APP_NOMBRE_ASCII) + "-";
-            std::string base = "https://github.com/" + std::string(APP_REPO) + "/releases/download/";
             for (const auto& a : j.value("assets", nlohmann::json::array()))
             {
-                std::string nombre = a.value("name", ""), url = a.value("browser_download_url", "");
+                std::string nombre = a.value("name", "");
                 bool esZip = nombre.size() > inicio.size() + 8 && nombre.compare(0, inicio.size(), inicio) == 0
                              && nombre.compare(nombre.size() - 8, 8, "-x64.zip") == 0;
-                if (esZip && url.compare(0, base.size(), base) == 0)
+                if (!etiqueta.empty() && esZip && EsTrozoSeguro(nombre))
                 {
-                    zip = url;
+                    zip = base + "download/" + etiqueta + "/" + nombre;
                     break;
                 }
             }
@@ -279,7 +306,8 @@ void ayuda::BuscarActualizacion(wxWindow* padre)
         }
 
         Enviar([idVentana, etiqueta, pagina, zip, repo]() {
-            wxWindow* padre = idVentana != wxID_ANY ? wxWindow::FindWindowById(idVentana) : nullptr;
+            wxWindow* padre = nullptr;
+            if (!SigueAbierta(idVentana, padre)) return;
             if (etiqueta.empty())
             {
                 Aviso(L"No pude buscar la actualización. Revisa tu internet y vuelve a intentarlo.",
@@ -296,8 +324,7 @@ void ayuda::BuscarActualizacion(wxWindow* padre)
             wxString nueva = wxString::FromUTF8(etiqueta);
             if (nueva.StartsWith(L"v") || nueva.StartsWith(L"V")) nueva = nueva.Mid(1);
             wxString paginaUrl = wxString::FromUTF8(pagina);
-            if (!paginaUrl.StartsWith(L"https://github.com/" + wxString(repo) + L"/releases/"))
-                paginaUrl = L"https://github.com/" + wxString(repo) + L"/releases/latest";
+            if (paginaUrl.empty()) paginaUrl = L"https://github.com/" + wxString(repo) + L"/releases/latest";
 
             wxString texto = wxString::Format(L"Hay una versión nueva: %s (tienes la %s).", nueva, Version());
             if (!zip.empty())
@@ -393,7 +420,7 @@ void ayuda::AgregarMenu(wxMenuBar* barra, wxFrame* ventana, const Opciones& opci
     auto* menu = new wxMenu();
     int idComo = wxWindow::NewControlId(), idReportar = wxWindow::NewControlId(), idRegistros = wxWindow::NewControlId(),
         idActualizar = wxWindow::NewControlId(), idDonar = wxWindow::NewControlId(), idPagina = wxWindow::NewControlId();
-    menu->Append(idComo, L"&Cómo se usa\tF1");
+    menu->Append(idComo, opciones.conF1 ? L"&Cómo se usa\tF1" : L"&Cómo se usa");
     menu->Append(idReportar, L"&Reportar un problema...");
     if (!opciones.carpetaDeRegistros.empty()) menu->Append(idRegistros, L"Abrir la carpeta de re&gistros");
     menu->AppendSeparator();
